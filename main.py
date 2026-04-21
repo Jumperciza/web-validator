@@ -271,8 +271,6 @@ def main():
                         help="Nepoužívat vnu.jar server mód (fallback na subprocess)")
     args = parser.parse_args()
 
-    _start_time = time.time()
-
     # ── Banner ───────────────────────────────────────────────────────────────
     print_banner()
 
@@ -320,6 +318,11 @@ def main():
         sys.exit(2)
     else:
         url = prompt_url()
+
+    # ── Start měření až když je URL zadaná ───────────────────────────────────
+    # (dřív bylo na začátku main() – pak se do časovače započítávalo
+    #  i čekání na zadání URL a kontrola/stažení vnu.jar)
+    _start_time = time.time()
 
     # ── Start vnu.jar server (pokud možno) ───────────────────────────────────
     if jar and not args.no_server:
