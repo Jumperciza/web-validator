@@ -3,81 +3,55 @@ Web Validator – hlavní spouštěcí soubor.
 
 Struktura:
   main.py            ← tento soubor (spouštěj tento)
-  config.py          ← sdílené konstanty (User-Agent, timeouty)
+  config.py          ← sdílené konstanty
+  ui.py              ← terminál UI (banner, prompt_url, helpers)
+  stats.py           ← výpočet statistik a skóre
+  issues.py          ← Issue dataclass pro strukturální problémy
   crawler.py         ← crawling stránek
   sitemap.py         ← načtení URL ze sitemap.xml
-  validator_w3c.py   ← W3C validace přes vnu.jar
+  validator_w3c.py   ← W3C validace (server mód + subprocess fallback)
   structure_check.py ← kontrola HTML struktury
-  robots_check.py    ← kontrola robots.txt (JS/CSS) + uživatelská sekce
+  robots_check.py    ← kontrola robots.txt + /uzivatel/
   report_excel.py    ← generování Excel reportu
   updater.py         ← kontrola verze vnu.jar z GitHubu
-  vnu.jar            ← lokální W3C validátor (stáhni z github.com/validator/validator)
+  vnu.jar            ← lokální W3C validátor
 """
 import argparse
+import re
 import sys
 import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
-import re
 
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from colors           import ok, warn, err, info, bold, gray, blue, pocet_problemu
-from config           import USER_AGENT, ACCEPT_LANGUAGE, FETCH_TIMEOUT
-from crawler          import crawl_site
-from sitemap          import fetch_sitemap_urls
-from robots_check     import check_robots_js_css, check_user_pages
+from colors          import ok, warn, err, info, gray, blue, pocet_problemu
+from config          import (USER_AGENT, ACCEPT_LANGUAGE, FETCH_TIMEOUT,
+                             FETCH_WORKERS, LOCAL_WORKERS, FETCH_DELAY,
+                             DEFAULT_MAX_PAGES)
+from crawler         import crawl_site
+from sitemap         import fetch_sitemap_urls
+from robots_check    import check_robots_js_css, check_user_pages
 import validator_w3c as w3c_mod
-from structure_check  import check_structure, check_homepage_meta
-from report_excel     import write_report
-from validator_w3c    import find_vnu_jar
-from updater          import check_and_update, download_vnu_jar
-
-_vnu_jar_path: str = ""
+from structure_check import check_structure, check_homepage_meta
+from report_excel    import write_report
+from validator_w3c   import find_vnu_jar, start_server, stop_server
+from updater         import check_and_update, download_vnu_jar
+from stats           import compute_stats
+from ui              import (prompt_url, print_banner, is_valid_url,
+                             normalize_url_input, write, write_line)
 
 
 def fetch_html(session: requests.Session, url: str, timeout: int = FETCH_TIMEOUT):
-    """
-    Stáhne HTML stránky přes sdílenou Session (opakované TCP spojení).
-    Vrátí (bytes, text, content_type) nebo (None, None, chyba).
-    """
+    """Stáhne HTML stránky přes sdílenou Session. Vrátí (bytes, text, ct) nebo (None, None, chyba)."""
     try:
         resp = session.get(url, timeout=timeout)
         resp.raise_for_status()
         return resp.content, resp.text, resp.headers.get("Content-Type", "text/html; charset=utf-8")
     except Exception as e:
         return None, None, str(e)
-
-
-# ── Paralelní konfigurace ────────────────────────────────────────────────────
-FETCH_WORKERS = 3
-LOCAL_WORKERS = 4
-FETCH_DELAY   = 0.5
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def calculate_score(results: list) -> int:
-    """
-    Web Quality Score (0–100).
-
-    Stránka je "špatná" pokud má:
-      - W3C chyby (error, warning_error)       NEBO
-      - Nepodařilo se ji načíst (validator_error) NEBO
-      - Strukturální problémy v HTML
-
-    Varování skóre nesnižují – jsou doporučení, ne blokátory.
-    """
-    if not results:
-        return 0
-    total = len(results)
-    bad   = sum(
-        1 for r in results
-        if r["w3c_category"] in ("error", "warning_error", "validator_error")
-        or bool(r["structure_issues"])
-    )
-    return max(0, min(100, round((total - bad) / total * 100)))
 
 
 def _score_color_fn(score: int):
@@ -96,26 +70,25 @@ def _print_result(idx: int, total: int, url: str, w3c: dict,
 
     cat = w3c["category"]
     if cat == "ok":
-        lines.append(("ok",   "[W3C: OK]"))
+        lines.append(("ok", "[W3C: OK]"))
     elif cat == "warning":
         lines.append(("warn", f"[W3C: VAROVÁNÍ {len(w3c['warnings'])}]"))
     elif cat == "error":
-        lines.append(("err",  f"[W3C: CHYBA {len(w3c['errors'])}]"))
+        lines.append(("err", f"[W3C: CHYBA {len(w3c['errors'])}]"))
     elif cat == "warning_error":
-        lines.append(("err",  f"[W3C: VAROVÁNÍ {len(w3c['warnings'])} + CHYBA {len(w3c['errors'])}]"))
+        lines.append(("err", f"[W3C: VAROVÁNÍ {len(w3c['warnings'])} + CHYBA {len(w3c['errors'])}]"))
     else:
         lines.append(("gray", "[W3C: přeskočeno]"))
         if w3c.get("error_msg"):
             lines.append(("plain", "\n  "))
-            lines.append(("warn",  "[!]"))
+            lines.append(("warn", "[!]"))
             lines.append(("plain", f" {w3c['error_msg']}"))
 
     lines.append(("plain", "  "))
     if structure_issues:
         lines.append(("warn", f"[STRUKTURA: {pocet_problemu(len(structure_issues))}]"))
     else:
-        lines.append(("ok",   "[STRUKTURA: OK]"))
-
+        lines.append(("ok", "[STRUKTURA: OK]"))
     lines.append(("plain", "\n"))
 
     _lock = getattr(_print_result, "_lock", None)
@@ -139,10 +112,7 @@ def validate_pages(pages: list, jar_path: str = "") -> list:
     total    = len(pages)
     computed = {}
 
-    # ── Sdílená HTTP Session – keep-alive pro všechny requesty ───────────────
-    # Jedna Session → opakované TCP spojení, výrazně rychlejší než nový
-    # request.get() pro každou stránku. requests.Session je thread-safe při
-    # paralelním čtení (získání různých URL).
+    # Sdílená HTTP Session – keep-alive TCP spojení
     session = requests.Session()
     session.headers.update({
         "User-Agent":      USER_AGENT,
@@ -164,12 +134,11 @@ def validate_pages(pages: list, jar_path: str = "") -> list:
             html_data[url] = result
             done += 1
             if done % FETCH_WORKERS == 0 or done == total:
-                sys.stdout.write(f"\r  Staženo: {done}/{total}   ")
-                sys.stdout.flush()
+                write(f"\r  Staženo: {done}/{total}   ")
             time.sleep(FETCH_DELAY / FETCH_WORKERS)
     print()
 
-    # ── Krok 2: W3C + Struktura + Image Audit ────────────────────────────────
+    # ── Krok 2: W3C + Struktura paralelně ────────────────────────────────────
     gray("  [2/3]"); print(" Validuji a kontroluji strukturu...\n")
 
     def _do_validate(args: tuple) -> tuple:
@@ -182,7 +151,6 @@ def validate_pages(pages: list, jar_path: str = "") -> list:
                 "w3c_warnings": [], "w3c_errors": [],
                 "w3c_error_msg": content_type,
                 "structure_issues": [], "homepage_meta": [],
-                "image_audit": [],
             }
 
         w3c_res    = [None]
@@ -193,13 +161,14 @@ def validate_pages(pages: list, jar_path: str = "") -> list:
                 w3c_res[0] = w3c_mod.validate(html_bytes, jar=jar_path)
             except Exception as e:
                 w3c_res[0] = {"category": "validator_error", "warnings": [],
-                               "errors": [], "error_msg": str(e)}
+                              "errors": [], "error_msg": str(e)}
 
         def _run_struct():
             try:
                 struct_res[0] = check_structure(html_text, page_url=url)
             except Exception as e:
-                struct_res[0] = [f"Chyba při kontrole struktury: {e}"]
+                struct_res[0] = []
+                gray(f"  (chyba struktura: {e})"); print()
 
         t1 = threading.Thread(target=_run_w3c)
         t2 = threading.Thread(target=_run_struct)
@@ -219,12 +188,13 @@ def validate_pages(pages: list, jar_path: str = "") -> list:
             "w3c_warnings":     w3c_res[0]["warnings"],
             "w3c_errors":       w3c_res[0]["errors"],
             "w3c_error_msg":    w3c_res[0]["error_msg"],
-            "structure_issues": struct_res[0],
+            "structure_issues": struct_res[0],   # list[Issue]
             "homepage_meta":    homepage_meta,
         }
 
     with ThreadPoolExecutor(max_workers=LOCAL_WORKERS) as ex:
-        futures = {ex.submit(_do_validate, (i + 1, url)): i for i, url in enumerate(pages)}
+        futures = {ex.submit(_do_validate, (i + 1, url)): i
+                   for i, url in enumerate(pages)}
         for future in as_completed(futures):
             try:
                 idx, result = future.result()
@@ -251,17 +221,13 @@ def validate_pages(pages: list, jar_path: str = "") -> list:
 
 
 def run_domain_checks(url: str) -> dict:
-    """
-    Spustí jednorázové kontroly na úrovni domény paralelně:
-      - robots.txt (JS/CSS blokování)
-      - Uživatelské stránky (/uzivatel/, /login/, …)
-    """
+    """Spustí paralelně robots.txt + /uzivatel/ check."""
     robots_result = [[], False]
     user_result   = [[]]
 
     def _do_robots():
         try:
-            issues, skipped  = check_robots_js_css(url)
+            issues, skipped = check_robots_js_css(url)
             robots_result[0] = issues
             robots_result[1] = skipped
         except Exception as e:
@@ -292,161 +258,23 @@ def make_filename(url: str) -> str:
     return f"{name}_validator.xlsx"
 
 
-# ── URL vstup s placeholderem a validací ─────────────────────────────────────
-
-_URL_PLACEHOLDER = "https://www.example.cz/"
-_URL_RE = re.compile(
-    r'^https?://'
-    r'(?:[a-zA-Z0-9-]+\.)+'   # alespoň jedna tečka (subdoména + doména)
-    r'[a-zA-Z]{2,}'            # TLD
-    r'(?:[/\S]*)?$',
-    re.IGNORECASE,
-)
-
-
-def _read_with_placeholder(prompt: str, placeholder: str) -> str:
-    """
-    Čte řádek vstupu. Zobrazí šedý placeholder text, který zmizí při
-    prvním stisku klávesy. Funguje na Windows (msvcrt) i Unix (termios).
-    Pokud stdin není terminál (pipe/redirect), padne zpět na plain input().
-    """
-    if not sys.stdin.isatty():
-        return input(prompt)
-
-    if sys.platform == "win32":
-        import msvcrt
-        sys.stdout.write(prompt); sys.stdout.flush()
-        gray(placeholder)           # Windows: gray() tiskne přímo
-
-        chars: list[str] = []
-        ph_active = True
-
-        while True:
-            ch = msvcrt.getwch()
-            if ch in ("\r", "\n"):
-                sys.stdout.write("\n"); sys.stdout.flush()
-                return "".join(chars)
-            elif ch == "\x08":                   # Backspace
-                if chars:
-                    chars.pop()
-                    sys.stdout.write("\b \b"); sys.stdout.flush()
-            elif ch == "\x03":                   # Ctrl+C
-                raise KeyboardInterrupt
-            elif ch in ("\x00", "\xe0"):         # Speciální klávesky – přeskočíme
-                msvcrt.getwch()
-            else:
-                if ph_active:
-                    line = prompt + placeholder
-                    sys.stdout.write("\r" + " " * len(line) + "\r" + prompt)
-                    sys.stdout.flush()
-                    ph_active = False
-                chars.append(ch)
-                sys.stdout.write(ch); sys.stdout.flush()
-    else:
-        import termios, tty, select
-
-        fd  = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-
-        # Unix: ANSI šedá barva přímo do výstupu
-        sys.stdout.write(f"{prompt}\033[90m{placeholder}\033[0m")
-        sys.stdout.flush()
-
-        chars: list[str] = []
-        ph_active = True
-
-        try:
-            tty.setraw(fd)
-            while True:
-                ch = sys.stdin.read(1)
-
-                if ch in ("\r", "\n"):
-                    sys.stdout.write("\r\n"); sys.stdout.flush()
-                    return "".join(chars)
-                elif ch in ("\x7f", "\x08"):     # Backspace / Delete
-                    if chars:
-                        chars.pop()
-                        sys.stdout.write("\b \b"); sys.stdout.flush()
-                elif ch == "\x03":               # Ctrl+C
-                    raise KeyboardInterrupt
-                elif ch == "\x1b":               # Escape sekvence (šipky apod.)
-                    if select.select([sys.stdin], [], [], 0.05)[0]:
-                        sys.stdin.read(1)        # [
-                        if select.select([sys.stdin], [], [], 0.05)[0]:
-                            sys.stdin.read(1)    # A/B/C/D
-                else:
-                    if ph_active:
-                        line_len = len(prompt) + len(placeholder)
-                        sys.stdout.write("\r" + " " * line_len + "\r" + prompt)
-                        sys.stdout.flush()
-                        ph_active = False
-                    chars.append(ch)
-                    sys.stdout.write(ch); sys.stdout.flush()
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-
-
-def _prompt_url() -> str:
-    """
-    Interaktivně se ptá na URL dokud nezadá validní adresu.
-    Přidá https:// pokud chybí. Validuje že URL vypadá smysluplně.
-    """
-    while True:
-        try:
-            raw = _read_with_placeholder("  Zadej web: ", _URL_PLACEHOLDER).strip()
-        except (KeyboardInterrupt, EOFError):
-            sys.stdout.write("\n"); sys.exit(0)
-
-        if not raw:
-            warn("  [!]"); print(" Zadej prosím URL webu.")
-            continue
-
-        # Přidej https:// pokud chybí
-        if not raw.startswith(("http://", "https://")):
-            raw = "https://" + raw
-
-        if not _URL_RE.match(raw):
-            err("  [✗]"); print(f" '{raw}' nevypadá jako platná URL.")
-            sys.stdout.write("     Zkus např. https://www.example.cz/\n")
-            sys.stdout.flush()
-            continue
-
-        return raw
-
-
 def main():
     parser = argparse.ArgumentParser(description="Web Validator – W3C + HTML struktura")
-    parser.add_argument("url",               nargs="?", help="URL webu")
-    parser.add_argument("--max-pages",       type=int,   default=500)
-    parser.add_argument("--delay",           type=float, default=1.0)
+    parser.add_argument("url", nargs="?", help="URL webu")
+    parser.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES)
+    parser.add_argument("--delay",     type=float, default=1.0)
     parser.add_argument("--no-update-check", action="store_true",
                         help="Přeskoč kontrolu verze vnu.jar")
     parser.add_argument("--no-interactive", action="store_true",
-                        help="Žádné interaktivní dotazy ani ENTER na konci (vhodné pro CI/skript)")
+                        help="Žádné interaktivní dotazy ani ENTER na konci")
+    parser.add_argument("--no-server", action="store_true",
+                        help="Nepoužívat vnu.jar server mód (fallback na subprocess)")
     args = parser.parse_args()
 
-    _start_time = time.time()   # ← Timer spuštěn hned po parsování argumentů
+    _start_time = time.time()
 
     # ── Banner ───────────────────────────────────────────────────────────────
-    print()
-    info("=" * 62); print()
-    print("  "); bold("Web Validator"); gray("  |  vytvořil Péťa"); print()
-    info("=" * 62); print()
-    print(f"  {bold('Co kontroluje:')} ")
-    print(f"    "); ok("1."); print(" W3C validace HTML (přes lokální vnu.jar)")
-    print(f"    "); ok("2."); print(" Struktura HTML:")
-    for item in ["existence a duplikáty <h1>", "pořadí nadpisů (žádné přeskočení)",
-                 "prázdné tagy", "duplicitní ID", "meta description",
-                 "alt texty u obrázků", "HTTP odkazy (místo HTTPS)",
-                 "externí odkazy bez target/_blank/noopener",
-                 "testovací/zástupný obsah (lorem ipsum, asdf…)",
-                 "lang atribut na <html>", "meta viewport"]:
-        gray(f"       - {item}"); print()
-    print(f"    "); ok("3."); print(" Meta title a description délka (jen homepage)")
-    print(f"    "); ok("4."); print(" Kontrola robots.txt – blokování CSS/JS pro Googlebot")
-    print(f"    "); ok("5."); print(" Kontrola existence uživatelské sekce (/uzivatel/)")
-    info("=" * 62); print()
-    print()
+    print_banner()
 
     # ── Detekce vnu.jar ──────────────────────────────────────────────────────
     jar = find_vnu_jar()
@@ -455,8 +283,6 @@ def main():
         if not args.no_update_check:
             jar = check_and_update(jar, non_interactive=args.no_interactive)
         w3c_mod.vnu_jar = jar
-        global _vnu_jar_path
-        _vnu_jar_path = jar
         ok("  [✓]"); print(f" W3C validátor připraven: {jar}")
     else:
         print()
@@ -464,7 +290,6 @@ def main():
         print()
 
         if args.no_interactive:
-            # Non-interactive: automaticky přeskoč W3C validaci
             gray("  Non-interactive mód – W3C validace bude přeskočena."); print()
             answer = "n"
         else:
@@ -477,30 +302,33 @@ def main():
             jar = download_vnu_jar()
             if jar:
                 w3c_mod.vnu_jar = jar
-                _vnu_jar_path   = jar
                 ok("  [✓]"); print(f" W3C validátor připraven: {jar}")
             else:
                 warn("  W3C validace bude přeskočena."); print()
         else:
             gray("  Bez vnu.jar bude W3C validace přeskočena."); print()
-            gray("  (Stáhni vnu.jar na github.com/validator/validator/releases"); print()
-            gray("   a Javu na adoptium.net, pak restartuj program.)"); print()
     print()
 
     # ── URL ──────────────────────────────────────────────────────────────────
     if args.url:
-        raw = args.url.strip()
-        if not raw.startswith(("http://", "https://")):
-            raw = "https://" + raw
-        if not _URL_RE.match(raw):
-            err(f"  [✗] '{raw}' nevypadá jako platná URL."); print()
+        url = normalize_url_input(args.url)
+        if not is_valid_url(url):
+            err(f"  [✗] '{url}' nevypadá jako platná URL."); print()
             sys.exit(2)
-        url = raw
     elif args.no_interactive:
         err("  [✗] Non-interactive mód vyžaduje URL jako argument."); print()
         sys.exit(2)
     else:
-        url = _prompt_url()
+        url = prompt_url()
+
+    # ── Start vnu.jar server (pokud možno) ───────────────────────────────────
+    if jar and not args.no_server:
+        gray("  Spouštím vnu.jar server..."); print()
+        if start_server(jar):
+            ok("  [✓]"); print(" W3C server běží – validace bude rychlejší.")
+        else:
+            warn("  [!]"); print(" Server start selhal – použijeme subprocess (pomalejší).")
+    print()
 
     # ── Sitemap → Crawler fallback ────────────────────────────────────────────
     pages        : list[str] = []
@@ -510,8 +338,7 @@ def main():
     try:
         sm_pages = fetch_sitemap_urls(url, max_urls=args.max_pages)
         if sm_pages:
-            ok("  [SITEMAP]")
-            print(f" Nalezeno {len(sm_pages)} URL – crawler přeskočen.")
+            ok("  [SITEMAP]"); print(f" Nalezeno {len(sm_pages)} URL – crawler přeskočen.")
             pages        = sm_pages
             source_label = f"sitemap.xml ({len(sm_pages)} URL)"
         else:
@@ -532,21 +359,22 @@ def main():
 
     if not pages:
         err("  [✗] Žádné stránky k validaci. Zkontroluj URL a připojení."); print()
+        stop_server()
         if not args.no_interactive:
             input("Stiskni ENTER pro ukončení...")
         return
 
     # ── Doménové kontroly ─────────────────────────────────────────────────────
-    info("  [DOMAIN]"); print(" Kontroluji robots.txt a uživatelské stránky...")
+    info("  [DOMAIN]"); print(" Kontroluji robots.txt a uživatelskou sekci...")
     try:
         domain_info = run_domain_checks(url)
     except Exception as e:
         err(f"  [!] Chyba doménových kontrol: {e}"); print()
         domain_info = {"robots_issues": [], "robots_skipped": False, "user_pages": []}
 
-    robots_issues  = domain_info.get("robots_issues",  [])
-    robots_skipped = domain_info.get("robots_skipped", False)
-    user_pages     = domain_info.get("user_pages",     [])
+    robots_issues  = domain_info["robots_issues"]
+    robots_skipped = domain_info["robots_skipped"]
+    user_pages     = domain_info["user_pages"]
     user_found     = [p for p in user_pages if p.get("exists")]
 
     if robots_skipped:
@@ -561,18 +389,21 @@ def main():
         warn("  [!] Nalezeny uživatelské stránky: ")
         print(", ".join(p["path"] for p in user_found))
     else:
-        ok("  [✓]"); print(" Žádné uživatelské stránky nenalezeny")
+        ok("  [✓]"); print(" Žádná uživatelská sekce nenalezena")
     print()
 
     # ── Validace stránek ─────────────────────────────────────────────────────
     info("--- VALIDACE + KONTROLA HTML START ---")
     ok(f" ({len(pages)} stránek)"); print("\n")
 
-    results = validate_pages(pages, jar_path=_vnu_jar_path)
+    results = validate_pages(pages, jar_path=jar)
 
-    # ── Skóre ────────────────────────────────────────────────────────────────
-    score    = calculate_score(results)
-    score_fn = _score_color_fn(score)
+    # Server už není potřeba — ukončíme ho
+    stop_server()
+
+    # ── Statistiky ────────────────────────────────────────────────────────────
+    stats    = compute_stats(results)
+    score_fn = _score_color_fn(stats.score)
 
     # ── Report ───────────────────────────────────────────────────────────────
     reports_dir = Path(__file__).resolve().parent / "excel reporty"
@@ -580,7 +411,7 @@ def main():
     output_path = reports_dir / make_filename(url)
     try:
         write_report(results, output_path, url,
-                     score=score,
+                     score=stats.score,
                      source_label=source_label,
                      domain_info=domain_info)
     except Exception as e:
@@ -588,40 +419,36 @@ def main():
         import traceback; traceback.print_exc()
 
     # ── Souhrn ───────────────────────────────────────────────────────────────
-    w3c_ok   = len([r for r in results if r["w3c_category"] == "ok"])
-    w3c_warn = len([r for r in results if r["w3c_category"] in ("warning", "warning_error")])
-    w3c_err  = len([r for r in results if r["w3c_category"] in ("error", "warning_error")])
-    s_ok     = len([r for r in results if not r["structure_issues"]])
-    s_bad    = len([r for r in results if r["structure_issues"]])
-
-    def _line(label, color_fn, value):
-        sys.stdout.write(f"  {label} "); sys.stdout.flush()
-        color_fn(str(value)); sys.stdout.write("\n"); sys.stdout.flush()
-
     print()
     info("=" * 62); print()
     print("  "); ok("HOTOVO!"); print()
 
-    sys.stdout.write("  Web Quality Score   : "); sys.stdout.flush()
-    score_fn(f"{score}/100"); sys.stdout.write("\n"); sys.stdout.flush()
+    write("  Web Quality Score   : ")
+    score_fn(f"{stats.score}/100"); write("\n")
 
     info("-" * 62); print()
-    _line("W3C – Bez problémů :", ok,                       w3c_ok)
-    _line("W3C – Varování     :", warn if w3c_warn else ok, w3c_warn)
-    _line("W3C – Chyby        :", err  if w3c_err  else ok, w3c_err)
-    _line("Struktura – OK     :", ok,                       s_ok)
-    _line("Struktura – Chyby  :", warn if s_bad    else ok, s_bad)
+    write_line("W3C – Bez problémů :", ok,
+               stats.w3c_ok)
+    write_line("W3C – Varování     :", warn if stats.w3c_warn else ok,
+               stats.w3c_warn)
+    write_line("W3C – Chyby        :", err if stats.w3c_err else ok,
+               stats.w3c_err)
+    write_line("Struktura – OK     :", ok,
+               stats.struct_ok)
+    write_line("Struktura – Chyby  :", warn if stats.struct_bad else ok,
+               stats.struct_bad)
+    if stats.w3c_failed:
+        write_line("Nepodařilo načíst  :", err, stats.w3c_failed)
 
-    sys.stdout.write(f"  Zdroj URL          : {source_label}\n"); sys.stdout.flush()
-    sys.stdout.write(f"  Uloženo do         : "); sys.stdout.flush()
-    blue(str(output_path)); sys.stdout.write("\n"); sys.stdout.flush()
+    write(f"  Zdroj URL          : {source_label}\n")
+    write(f"  Uloženo do         : ")
+    blue(str(output_path)); write("\n")
 
-    # Timer
     elapsed = time.time() - _start_time
     mins, secs = divmod(int(elapsed), 60)
     time_str = f"{mins}m {secs}s" if mins else f"{secs}s"
-    sys.stdout.write(f"  Celková doba       : "); sys.stdout.flush()
-    gray(time_str); sys.stdout.write("\n"); sys.stdout.flush()
+    write(f"  Celková doba       : ")
+    gray(time_str); write("\n")
 
     info("=" * 62); print("\n")
 

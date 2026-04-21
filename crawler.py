@@ -17,13 +17,13 @@ import requests
 from bs4 import BeautifulSoup
 
 from colors import ok, warn, err, gray
-from config import USER_AGENT, ACCEPT_LANGUAGE, CRAWL_TIMEOUT as _CT
+from config import (USER_AGENT, ACCEPT_LANGUAGE, CRAWL_TIMEOUT,
+                    CRAWL_WORKERS, MIN_CRAWL_DELAY)
 
 # ── Konfigurace ──────────────────────────────────────────────────────────────
-WORKERS       = 5      # max současných požadavků (respektuje server)
-MIN_DELAY     = 0.2    # minimální pauza mezi požadavky na stejný server (s)
-CRAWL_TIMEOUT = _CT    # timeout pro jeden požadavek (s)
-UA            = USER_AGENT
+WORKERS   = CRAWL_WORKERS
+MIN_DELAY = MIN_CRAWL_DELAY
+UA        = USER_AGENT
 
 # ── Filtry – precompilované regex vzory (rychlejší než str→re.search každé volání) ──
 _IGNORE_PATTERNS = [
@@ -114,9 +114,6 @@ def crawl_site(start_url: str, max_pages: int = 500,
     seen_lock = threading.Lock()
     found    = []
 
-    # Ukazatel počtu stránek
-    counter = [0]
-
     def _process_batch(batch: list) -> list:
         """Stáhne dávku URL paralelně a vrátí nové linky."""
         new_links = []
@@ -129,7 +126,6 @@ def crawl_site(start_url: str, max_pages: int = 500,
 
                 with seen_lock:
                     found.append(url)
-                    counter[0] += 1
 
                 sys.stdout.write("  "); sys.stdout.flush()
                 ok("[OK]")

@@ -16,20 +16,16 @@ from urllib.parse import urlparse
 
 import requests
 
-from config import USER_AGENT, ACCEPT_LANGUAGE, DEFAULT_TIMEOUT
+from config import (USER_AGENT, ACCEPT_LANGUAGE, DEFAULT_TIMEOUT,
+                    SKIP_ROBOTS_PATTERNS)
 
 UA      = USER_AGENT
 TIMEOUT = DEFAULT_TIMEOUT
 
 # ── Konstanty ─────────────────────────────────────────────────────────────────
 
-# Domény pro které se přeskočí robots.txt kontrola
-_SKIP_ROBOTS_PATTERNS = [
-    "poskireal.cz",
-    "poski.com",
-    "poski.",           # catch-all pro subdomény
-    ".cz.dev.",         # dev prostředí
-]
+# _SKIP_ROBOTS_PATTERNS importujeme z config.py
+_SKIP_ROBOTS_PATTERNS = SKIP_ROBOTS_PATTERNS
 
 # Cesta ke kontrole existence uživatelské sekce
 _USER_PATH = "/uzivatel/"
