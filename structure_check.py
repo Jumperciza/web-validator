@@ -1,49 +1,70 @@
 """
 Kontrola HTML struktury.
 
+Vrací List[Issue] — strukturovaná data (viz issues.py).
+Pro zpětnou kompatibilitu je tu ještě `check_structure_legacy()` co vrací list stringů.
+
 Prováděné kontroly:
   1.  Existence a duplikáty <h1>
   2.  Pořadí nadpisů (žádné přeskočení)
-  3.  Prázdné tagy (jeden průchod DOMem)
+  3.  Prázdné tagy
   4.  Duplicitní ID
   5.  Meta description (existence + neprázdnost)
   6.  Alt texty u obrázků
   7.  HTTP odkazy (místo HTTPS)
-  8.  Externí odkazy bez target="_blank" rel="noopener"  ← nové
-  9.  Testovací / zástupný obsah (lorem ipsum, asdf…)    ← nové
-  10. Chybějící lang atribut na <html>                   ← bonus
-  11. Chybějící <meta name="viewport">                   ← bonus
+  8.  Externí odkazy bez target="_blank" rel="noopener"
+  9.  Testovací / zástupný obsah
+  10. Chybějící lang atribut na <html>
+  11. Chybějící <meta name="viewport">
 """
+import copy
 import re
+from typing import List
 from urllib.parse import urlparse
+
 from bs4 import BeautifulSoup
+
+from config import META_TITLE_MIN, META_TITLE_MAX, META_DESC_MIN, META_DESC_MAX
+from issues import Issue, IssueType
 
 _EMPTY_TAGS = ["p", "div", "span", "section", "article",
                "li", "td", "th", "h1", "h2", "h3", "h4", "h5", "h6"]
 
-META_TITLE_MIN = 30;  META_TITLE_MAX = 60
-META_DESC_MIN  = 70;  META_DESC_MAX  = 160
-
 # ── Zakázaná slova / testovací obsah ─────────────────────────────────────────
+# Použity jen konkrétní výrazy — "lorem" samotné je příliš obecné (false-positive
+# na textech o latině). "lorem ipsum" je specifický a jednoznačný.
 _FORBIDDEN_WORDS: list[str] = [
     "lorem ipsum",
-    "lorem",
     "testujeme",
     "testovaci text",
+    "testovací text",
     "testovaci obsah",
+    "testovací obsah",
     "asdf",
     "qwerty",
+    "přidat text",
     "pridat text",
-    "vloztte text",
+    "vložte text",
     "vložit text",
     "dummy text",
     "placeholder text",
     "sample text",
+    "změňte tento text",
     "zmente tento text",
     "text zde",
     "nadpis zde",
 ]
 
+# Parser preference — lxml je 3-5× rychlejší než html.parser
+# Fallback na html.parser pokud lxml není nainstalován
+try:
+    import lxml  # noqa: F401
+    _PARSER = "lxml"
+except ImportError:
+    _PARSER = "html.parser"
+
+
+# ── Pomocné funkce ───────────────────────────────────────────────────────────
 
 def _netloc_bare(url: str) -> str:
     return urlparse(url).netloc.lower().removeprefix("www.")
@@ -58,48 +79,61 @@ def _is_external(href: str, page_url: str) -> bool:
 
 
 def _has_safe_rel(tag) -> bool:
-    """True pokud rel obsahuje noopener nebo noreferrer (noreferrer implkuje noopener)."""
+    """True pokud rel obsahuje noopener nebo noreferrer."""
     rel = tag.get("rel", [])
     if isinstance(rel, str):
         rel = rel.split()
     return bool({"noopener", "noreferrer"} & {r.lower() for r in rel})
 
 
-def check_structure(html: str, page_url: str = "") -> list:
+# ── Hlavní funkce ────────────────────────────────────────────────────────────
+
+def check_structure(html: str, page_url: str = "") -> List[Issue]:
     """
-    Vrátí seznam textových problémů v HTML.
+    Vrátí seznam Issue objektů.
     page_url slouží k rozlišení interních vs. externích odkazů.
     """
-    issues = []
-    soup   = BeautifulSoup(html, "html.parser")
+    issues: List[Issue] = []
+    soup   = BeautifulSoup(html, _PARSER)
 
     # 1. H1
     h1s = soup.find_all("h1")
     if not h1s:
-        issues.append("Chybí <h1> tag")
+        issues.append(Issue(type=IssueType.MISSING_H1))
     elif len(h1s) > 1:
-        issues.append(f"Více <h1> tagů ({len(h1s)}x) – měl by být pouze jeden")
+        issues.append(Issue(
+            type=IssueType.MULTIPLE_H1,
+            count=len(h1s),
+            detail=f"Nalezeno {len(h1s)}x, měl by být pouze jeden"
+        ))
 
     # 2. Pořadí nadpisů
     prev, skips = 0, set()
+    skip_items: list[str] = []
     for h in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
         lvl = int(h.name[1])
         if prev > 0 and lvl > prev + 1:
             key = (prev, lvl)
             if key not in skips:
-                issues.append(f"Přeskočení nadpisů: <h{prev}> → <h{lvl}> (chybí <h{prev+1}>)")
                 skips.add(key)
+                skip_items.append(f"<h{prev}> → <h{lvl}> (chybí <h{prev+1}>)")
         prev = lvl
+    if skip_items:
+        issues.append(Issue(
+            type=IssueType.HEADING_SKIP,
+            items=skip_items,
+            count=len(skip_items),
+        ))
 
-    # 3. Prázdné tagy – jeden průchod DOMem
+    # 3. Prázdné tagy — jeden průchod, separátní Issue pro každý typ
     empty_counts: dict[str, int] = {}
     for t in soup.find_all(_EMPTY_TAGS):
         if not t.get_text(strip=True) and not t.find():
             empty_counts[t.name] = empty_counts.get(t.name, 0) + 1
-    for tag in _EMPTY_TAGS:
+    for tag in _EMPTY_TAGS:   # zachovat pořadí
         n = empty_counts.get(tag, 0)
         if n:
-            issues.append(f"Prázdný tag <{tag}> ({n}x)")
+            issues.append(Issue(type=IssueType.EMPTY_TAG, tag=tag, count=n))
 
     # 4. Duplicitní ID
     ids: dict[str, int] = {}
@@ -107,29 +141,34 @@ def check_structure(html: str, page_url: str = "") -> list:
         v = t.get("id", "").strip()
         if v:
             ids[v] = ids.get(v, 0) + 1
-    for v, n in ids.items():
-        if n > 1:
-            issues.append(f"Duplicitní ID: #{v} ({n}x)")
+    dup_ids = [f"#{v} ({n}x)" for v, n in ids.items() if n > 1]
+    if dup_ids:
+        issues.append(Issue(
+            type=IssueType.DUPLICATE_ID,
+            items=dup_ids,
+            count=len(dup_ids),
+        ))
 
     # 5. Meta description
     md = soup.find("meta", attrs={"name": re.compile(r"^description$", re.I)})
     if not md:
-        issues.append('Chybí <meta name="description">')
+        issues.append(Issue(type=IssueType.MISSING_META_DESC))
     elif not md.get("content", "").strip():
-        issues.append('<meta name="description"> je prázdná')
+        issues.append(Issue(type=IssueType.EMPTY_META_DESC))
 
     # 6. Alt texty
     missing_alt = []
     for img in soup.find_all("img"):
         if img.get("alt") is None:
             src = img.get("src", "").strip()
-            missing_alt.append(src[:60] + "..." if len(src) > 60 else src or "(bez src)")
+            display = src[:80] + "…" if len(src) > 80 else src or "(bez src)"
+            missing_alt.append(display)
     if missing_alt:
-        issues.append(f"Obrázky bez alt atributu ({len(missing_alt)}x):")
-        for s in missing_alt[:10]:
-            issues.append(f"    img: {s}")
-        if len(missing_alt) > 10:
-            issues.append(f"    … a dalších {len(missing_alt) - 10}")
+        issues.append(Issue(
+            type=IssueType.MISSING_ALT,
+            items=missing_alt[:50],   # limit v items, count je totální
+            count=len(missing_alt),
+        ))
 
     # 7. HTTP odkazy
     http_links = list(dict.fromkeys(
@@ -137,11 +176,11 @@ def check_structure(html: str, page_url: str = "") -> list:
         if a["href"].strip().startswith("http://")
     ))
     if http_links:
-        issues.append(f"HTTP odkazy (nezabezpečené) ({len(http_links)}x):")
-        for lnk in http_links[:10]:
-            issues.append(f"    {lnk[:80]}")
-        if len(http_links) > 10:
-            issues.append(f"    … a dalších {len(http_links) - 10}")
+        issues.append(Issue(
+            type=IssueType.HTTP_LINK,
+            items=http_links[:50],
+            count=len(http_links),
+        ))
 
     # 8. Externí odkazy bez target="_blank" rel="noopener"
     bad_ext: list[str] = []
@@ -156,42 +195,45 @@ def check_structure(html: str, page_url: str = "") -> list:
         if not _has_safe_rel(a):
             missing_parts.append('rel="noopener"')
         if missing_parts:
-            label = href[:70] + ("…" if len(href) > 70 else "")
+            label = href[:80] + "…" if len(href) > 80 else href
             entry = f"{label}  [chybí: {', '.join(missing_parts)}]"
             if entry not in seen_ext:
                 seen_ext.add(entry)
                 bad_ext.append(entry)
-
     if bad_ext:
-        issues.append(f"Externí odkazy bez target/noopener ({len(bad_ext)}x):")
-        for lnk in bad_ext[:10]:
-            issues.append(f"    {lnk}")
-        if len(bad_ext) > 10:
-            issues.append(f"    … a dalších {len(bad_ext) - 10}")
+        issues.append(Issue(
+            type=IssueType.EXTERNAL_LINK,
+            items=bad_ext[:50],
+            count=len(bad_ext),
+        ))
 
     # 9. Testovací / zástupný obsah
-    # Odstraníme <script> a <style> aby se nehledalo v JS/CSS kódu
-    for unwanted in soup(["script", "style"]):
+    # Odstraníme <script>/<style> na KOPII soup — abychom neznehodnotili
+    # původní DOM pro další kontroly (kdyby se přidaly níže)
+    soup_text = copy.copy(soup)
+    for unwanted in soup_text(["script", "style"]):
         unwanted.decompose()
-    page_text = soup.get_text(" ", strip=True).lower()
+    page_text = soup_text.get_text(" ", strip=True).lower()
 
     found_words: list[str] = []
     for word in _FORBIDDEN_WORDS:
         if word in page_text and word not in found_words:
             found_words.append(word)
     if found_words:
-        issues.append(f"Testovací/zástupný obsah nalezen ({len(found_words)} výraz(ů)):")
-        for w in found_words:
-            issues.append(f"    \"{w}\"")
+        issues.append(Issue(
+            type=IssueType.FORBIDDEN_CONTENT,
+            items=[f'"{w}"' for w in found_words],
+            count=len(found_words),
+        ))
 
-    # 10. Chybějící lang atribut na <html> (bonus)
+    # 10. lang atribut na <html>
     html_tag = soup.find("html")
     if html_tag is not None and not html_tag.get("lang", "").strip():
-        issues.append('Chybějící lang atribut na <html> (např. lang="cs")')
+        issues.append(Issue(type=IssueType.MISSING_LANG))
 
-    # 11. Chybějící <meta name="viewport"> (bonus)
+    # 11. Meta viewport
     if not soup.find("meta", attrs={"name": re.compile(r"^viewport$", re.I)}):
-        issues.append('Chybějící <meta name="viewport"> – problém na mobilech')
+        issues.append(Issue(type=IssueType.MISSING_VIEWPORT))
 
     return issues
 
@@ -199,7 +241,7 @@ def check_structure(html: str, page_url: str = "") -> list:
 def check_homepage_meta(html: str) -> list:
     """Kontrola délky meta title + description – jen na homepage."""
     issues = []
-    soup   = BeautifulSoup(html, "html.parser")
+    soup   = BeautifulSoup(html, _PARSER)
 
     title = soup.find("title")
     if not title or not title.get_text(strip=True):

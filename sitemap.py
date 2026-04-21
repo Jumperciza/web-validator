@@ -18,8 +18,8 @@ from urllib.parse import urlparse
 import requests
 
 from colors import ok, warn, gray, info
-from config import USER_AGENT, ACCEPT_LANGUAGE, DEFAULT_TIMEOUT
-# Přesunuto z pozdního importu – pomocné funkce ze crawleru
+from config import (USER_AGENT, ACCEPT_LANGUAGE, DEFAULT_TIMEOUT,
+                    SITEMAP_MAX_DEPTH)
 from crawler import _same_domain, _ignore, _url_key
 
 UA      = USER_AGENT
@@ -49,46 +49,70 @@ def _parse_sitemap_xml(xml_text: str) -> tuple[list, list]:
     """
     Parsuje sitemap XML.
     Vrátí (page_urls, sub_sitemap_urls).
-    Funguje pro <urlset> i <sitemapindex>.
+    Funguje pro <urlset> (běžné stránky) i <sitemapindex> (seznam sub-sitemap).
+
+    Rozlišení: procházíme přímé child elementy root tagu.
+      - <sitemapindex>   → všechny <loc> jsou sitemap URL
+      - <urlset>         → všechny <loc> jsou page URL
+      - Jiný root (fallback) → použij koncovku + heuristiku
     """
     page_urls    = []
     sitemap_urls = []
 
     try:
-        # Odstraníme namespace pro jednodušší parsing (ET ho vyžaduje v {})
-        # Varianta A: ET s namespace-aware cestami
         root = ET.fromstring(xml_text)
 
-        def _find_all(tag: str) -> list:
-            """Hledá tag s i bez namespace."""
-            results = root.findall(f".//{{{_NS}}}{tag}")
-            if not results:
-                results = root.findall(f".//{tag}")
+        # Odstraň namespace z tagu pro jednoduché porovnání
+        def _local_name(tag: str) -> str:
+            return tag.split("}", 1)[-1] if "}" in tag else tag
+
+        root_name = _local_name(root.tag).lower()
+
+        def _all_locs(parent: ET.Element) -> list[str]:
+            """Vrátí text všech <loc> dětí daného elementu (s i bez namespace)."""
+            results = []
+            for child in parent:
+                if _local_name(child.tag).lower() == "loc":
+                    text = (child.text or "").strip()
+                    if text:
+                        results.append(text)
             return results
 
-        for loc in _find_all("loc"):
-            text = (loc.text or "").strip()
-            if not text:
-                continue
-            parent_tag = loc.find("..") if hasattr(loc, "find") else None
-            # Rozlišení: jsme v <sitemap> (index) nebo <url> (stránka)?
-            # Spolehlivější je projít přes parent tag
-            sitemap_urls.append(text) if text.endswith(".xml") and (
-                "sitemap" in text.lower() or _in_sitemap_element(root, text)
-            ) else page_urls.append(text)
+        if root_name == "sitemapindex":
+            # <sitemapindex><sitemap><loc>...</loc></sitemap></sitemapindex>
+            for sm in root:
+                if _local_name(sm.tag).lower() == "sitemap":
+                    sitemap_urls.extend(_all_locs(sm))
+        elif root_name == "urlset":
+            # <urlset><url><loc>...</loc></url></urlset>
+            for u in root:
+                if _local_name(u.tag).lower() == "url":
+                    page_urls.extend(_all_locs(u))
+        else:
+            # Neznámý root — fallback: vše <loc> kde URL končí .xml = sitemap
+            for loc in root.iter():
+                if _local_name(loc.tag).lower() == "loc":
+                    text = (loc.text or "").strip()
+                    if not text:
+                        continue
+                    if text.endswith(".xml") and "sitemap" in text.lower():
+                        sitemap_urls.append(text)
+                    else:
+                        page_urls.append(text)
 
-    except ET.ParseError as e:
-        # Pokus o záchranný parsing – odstraníme namespace a zkusíme znovu
+    except ET.ParseError:
+        # Záchranný parsing — odstraň namespace a zkus znovu
         try:
             clean = re.sub(r'\s*xmlns(?::[^=]+)?="[^"]+"', "", xml_text)
             root  = ET.fromstring(clean)
             for sm in root.findall(".//sitemap/loc"):
                 t = (sm.text or "").strip()
-                if t: sitemap_urls.append(t)
+                if t:
+                    sitemap_urls.append(t)
             for url in root.findall(".//url/loc"):
                 t = (url.text or "").strip()
-                if t: page_urls.append(t)
-            # Fallback – nic nenašlo, vezmi vše z <loc>
+                if t:
+                    page_urls.append(t)
             if not page_urls and not sitemap_urls:
                 for loc in root.findall(".//loc"):
                     t = (loc.text or "").strip()
@@ -98,20 +122,9 @@ def _parse_sitemap_xml(xml_text: str) -> tuple[list, list]:
                         else:
                             page_urls.append(t)
         except ET.ParseError:
-            gray(f"  (XML parse chyba, sitemap přeskočena)"); print()
+            gray("  (XML parse chyba, sitemap přeskočena)"); print()
 
     return page_urls, sitemap_urls
-
-
-def _in_sitemap_element(root: ET.Element, url_text: str) -> bool:
-    """Vrátí True pokud se daná URL nachází uvnitř <sitemap> elementu (ne <url>)."""
-    for sm_elem in root.iter():
-        if sm_elem.tag in (f"{{{_NS}}}sitemap", "sitemap"):
-            for loc in sm_elem:
-                if loc.tag in (f"{{{_NS}}}loc", "loc"):
-                    if (loc.text or "").strip() == url_text:
-                        return True
-    return False
 
 
 def _sitemap_candidates(base_url: str, session: requests.Session) -> list[str]:
@@ -171,9 +184,9 @@ def fetch_sitemap_urls(base_url: str, max_urls: int = 500) -> list[str]:
     found_sitemap    = False
 
     def _process_sitemap(sm_url: str, depth: int = 0) -> None:
-        """Rekurzivně zpracuje sitemap (max hloubka 3 pro sitemap index)."""
+        """Rekurzivně zpracuje sitemap (max hloubka SITEMAP_MAX_DEPTH pro sitemap index)."""
         nonlocal found_sitemap
-        if sm_url in visited_sitemaps or depth > 3:
+        if sm_url in visited_sitemaps or depth > SITEMAP_MAX_DEPTH:
             return
         visited_sitemaps.add(sm_url)
 
