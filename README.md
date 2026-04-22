@@ -41,17 +41,52 @@ Testuje jestli existuje `/uzivatel/`.
 
 ## 📊 Web Quality Score
 
-```
-Score = (stránky bez problémů / celkem stránek) × 100
-```
+Skóre se počítá **váhově** — ne všechny problémy mají stejnou závažnost.
 
-Stránka je **špatná** pokud má W3C chyby, strukturální problémy, nebo se nepodařila načíst.
+**Princip:** každá stránka začíná na 100 bodech. Za každý problém se odečítá podle typu a počtu. Celkové skóre webu = průměr skóre všech stránek.
+
+### Kritické problémy (binární — buď jsou, nebo nejsou)
+
+| Problém | Penalizace |
+|---|---|
+| Testovací obsah v produkci (lorem ipsum, asdf…) | **−20** |
+| Chybí `<h1>` | **−15** |
+| Chybí meta description | **−15** |
+| Prázdná meta description | **−15** |
+| Chybí meta viewport | **−15** |
+| Chybí `lang` atribut na `<html>` | **−10** |
+| Duplicitní `<h1>` | **−8** |
+| Přeskočení úrovně nadpisů | **−5** |
+
+### Počítané problémy (penalizace škáluje s počtem, ale s cap)
+
+| Problém | Za každý výskyt | Max cap |
+|---|---|---|
+| Duplicitní ID | −3 | −15 |
+| HTTP odkazy (mixed content) | −2 | −15 |
+| Chybějící alt texty | −1.5 | −15 |
+| Prázdné tagy | −0.5 | −8 |
+| Externí odkazy bez `target/noopener` | −0.5 | −6 |
+
+### W3C chyby
+
+- Každá chyba: **−2 body**, maximum **−20** bodů na stránku
+- W3C **varování skóre neovlivňují** (většinou jde o kompatibilitu/styling)
+
+### Speciální případy
+
+- **Nedostupná stránka** (HTTP 404, timeout, chyba serveru) → automaticky **0 bodů**
+- **Prázdný výsledek** → skóre 0
+
+### Hodnocení
 
 | Skóre | Hodnocení | Barva |
 |---|---|---|
 | 80–100 | Výborný | 🟢 |
 | 60–79 | Průměrný | 🟡 |
 | 0–59 | Špatný | 🔴 |
+
+> 💡 **Ladění vah:** všechny konstanty jsou nahoře v `stats.py` (`_BINARY_PENALTIES`, `_COUNTED_PENALTIES`, `_W3C_ERROR_*`). Dají se snadno upravit podle potřeb konkrétního auditu.
 
 ---
 
