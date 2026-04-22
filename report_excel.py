@@ -76,8 +76,14 @@ def _spacer(ws, row, height=10):
     ws.row_dimensions[row].height = height
     return row + 1
 
+def _as_https(url: str) -> str:
+    """Normalizuje URL na https:// (přepíše http:// → https://)."""
+    if isinstance(url, str) and url.startswith("http://"):
+        return "https://" + url[7:]
+    return url
+
 def _w3c_link(url: str) -> str:
-    return "https://validator.w3.org/nu/?doc=" + quote(url, safe="")
+    return "https://validator.w3.org/nu/?doc=" + quote(_as_https(url), safe="")
 
 def _score_palette(score: int) -> tuple[str, str]:
     if score >= 80: return SCORE_COLORS["good"]
@@ -98,7 +104,7 @@ def _write_header(ws, start_url: str, source_label: str) -> int:
     ws.merge_cells("A2:G2")
     m = ws["A2"]
     src_info = f"  |  Zdroj: {source_label}" if source_label else ""
-    m.value = (f"Web: {start_url}     |     Datum: "
+    m.value = (f"Web: {_as_https(start_url)}     |     Datum: "
                f"{datetime.now().strftime('%d.%m.%Y  %H:%M')}{src_info}")
     m.font = Font(name="Arial", size=10, color="555555"); m.alignment = _al("center")
     ws.row_dimensions[2].height = 20
@@ -106,7 +112,7 @@ def _write_header(ws, start_url: str, source_label: str) -> int:
     return 4
 
 
-def _write_summary(ws, row: int, score: int, stats) -> int:
+def _write_summary(ws, row: int, score: int, stats, http_converted: bool = False) -> int:
     _title_row(ws, row, "SOUHRN", SUB); row += 1
 
     if score >= 0:
@@ -145,6 +151,18 @@ def _write_summary(ws, row: int, score: int, stats) -> int:
         vc.font = Font(name="Arial", bold=True, size=13, color=ft)
         vc.fill = _fill(bg); vc.alignment = _al("center"); vc.border = _brd()
         ws.row_dimensions[row].height = 22; row += 1
+
+    # Upozornění na http → https převod (zobrazí se jen když k tomu skutečně došlo)
+    if http_converted:
+        ws.merge_cells(f"A{row}:G{row}")
+        cell = ws.cell(row=row, column=1,
+                       value="ℹ Sitemap obsahovala URL s http:// – v reportu jsou zobrazeny jako https://")
+        cell.font = _bf(bold=False, color=B_FT, sz=10)
+        cell.fill = _fill(B_BG)
+        cell.alignment = _al("center")
+        cell.border = _brd()
+        ws.row_dimensions[row].height = 20
+        row += 1
 
     return row
 
@@ -232,8 +250,9 @@ def _write_structure_section(ws, row: int, results: list) -> int:
             if not isinstance(issue, Issue):
                 continue
             label = issue.label
-            if r["url"] not in grouped[label]:
-                grouped[label].append(r["url"])
+            url_https = _as_https(r["url"])
+            if url_https not in grouped[label]:
+                grouped[label].append(url_https)
 
     if not grouped:
         ws.merge_cells(f"A{row}:G{row}")
@@ -282,7 +301,7 @@ def _write_failed_pages(ws, row: int, results: list) -> int:
 
     for r in failed_pages:
         ws.merge_cells(f"A{row}:D{row}")
-        _dc(ws, row, 1, r["url"], bg=R_BG, ft=R_FT)
+        _dc(ws, row, 1, _as_https(r["url"]), bg=R_BG, ft=R_FT)
         ws.merge_cells(f"E{row}:G{row}")
         err_msg = str(r.get("w3c_error_msg") or "")[:200]
         _dc(ws, row, 5, err_msg, bg=R_BG, ft=R_FT)
@@ -358,7 +377,7 @@ def _write_user_pages(ws, row: int, user_pages: list) -> int:
 
         _dc(ws, row, 1, p["path"], bold=True)
         ws.merge_cells(f"B{row}:D{row}")
-        _dc(ws, row, 2, p["url"])
+        _dc(ws, row, 2, _as_https(p["url"]))
         ws.merge_cells(f"E{row}:F{row}")
         _dc(ws, row, 5, sc if sc else "–", align="center",
             bg=O_BG if exists else GR_BG)
@@ -383,6 +402,13 @@ def write_report(results: list, output_path: Path, start_url: str,
     robots_skipped = domain_info.get("robots_skipped", False)
     user_pages     = domain_info.get("user_pages", [])
 
+    # Detekce jestli se nějaká URL převedla z http na https
+    http_converted = (
+        any(r.get("url", "").startswith("http://") for r in results)
+        or start_url.startswith("http://")
+        or any(p.get("url", "").startswith("http://") for p in user_pages)
+    )
+
     wb = Workbook()
     wb.remove(wb.active)
     ws = wb.create_sheet("📋 Report")
@@ -392,7 +418,7 @@ def write_report(results: list, output_path: Path, start_url: str,
         ws.column_dimensions[col].width = w
 
     row = _write_header(ws, start_url, source_label)
-    row = _write_summary(ws, row, score, stats)
+    row = _write_summary(ws, row, score, stats, http_converted=http_converted)
     row = _write_homepage_meta(ws, row, results)
     row = _write_w3c_section(ws, row, results)
     row = _write_structure_section(ws, row, results)
