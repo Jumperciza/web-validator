@@ -5,4 +5,8 @@
 requests>=2.31.0,<3.0.0
 beautifulsoup4>=4.12.0,<5.0.0
 openpyxl>=3.1.0,<4.0.0
-lxml>=5.0.0,<6.0.0
+
+# lxml je volitelný – výrazně zrychluje parsování HTML (3-5×).
+# Pokud instalace selže (Python 3.14+, chybí C++ Build Tools),
+# program automaticky přepne na html.parser a funguje bez něj.
+# lxml>=5.0.0,<6.0.0
