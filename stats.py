@@ -31,6 +31,7 @@ from issues import IssueType
 # (počet výskytů u nich nedává smysl nebo je vždy ~1)
 _BINARY_PENALTIES: dict[IssueType, float] = {
     # Kritické — SEO / mobile killer
+    IssueType.NOINDEX:            25,   # web nebude indexován Googlem = SEO katastrofa
     IssueType.FORBIDDEN_CONTENT:  20,   # lorem ipsum v produkci = katastrofa
     IssueType.MISSING_H1:         15,
     IssueType.MISSING_META_DESC:  15,
