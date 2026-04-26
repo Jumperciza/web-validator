@@ -39,3 +39,13 @@ SKIP_ROBOTS_PATTERNS = [
     "poski.",
     ".cz.dev.",
 ]
+
+# ── Skip patterns pro noindex kontrolu ───────────────────────────────────────
+# Domény kde je <meta name="robots" content="noindex"> záměr (dev/staging)
+# a noindex check se proto přeskočí. Schválně užší než SKIP_ROBOTS_PATTERNS —
+# noindex je vážnější chyba a chceme ho hlásit i na "podezřelých" doménách,
+# ne-li tady přesně definovaných.
+SKIP_NOINDEX_PATTERNS = [
+    "cz.dev.poski.com",   # *.cz.dev.poski.com  → dev prostředí Poski
+    "poskireal.cz",       # *.poskireal.cz      → staging prostředí Poski
+]

@@ -10,7 +10,7 @@ Nástroj pro automatizovaný technický audit webu. Zadáš URL, program projde 
 Každá stránka prochází lokální validací přes `vnu.jar` (offline, žádná data se neodesílají). Výsledky jsou rozděleny na **OK**, **Varování** a **Chyby**.
 
 ### 2. Struktura HTML
-Na každé stránce se kontroluje 11 věcí:
+Na každé stránce se kontroluje 12 věcí:
 
 | Co se kontroluje | Popis |
 |---|---|
@@ -25,6 +25,9 @@ Na každé stránce se kontroluje 11 věcí:
 | Testovací obsah | Detekuje lorem ipsum, asdf, qwerty a další zástupné texty |
 | `lang` atribut | `<html lang="cs">` je důležitý pro SEO a čtečky obrazovky |
 | Meta viewport | Bez něj se stránka na mobilech zobrazuje špatně |
+| `noindex` meta tag | Detekuje `<meta name="robots" content="noindex">` na produkci |
+
+> ⚠️ **Noindex check** je přeskočen pro dev/staging domény (`*.cz.dev.poski.com`, `*.poskireal.cz`), kde je `noindex` záměrný.
 
 ### 3. Meta údaje homepage
 - **Title:** 30–60 znaků
@@ -49,6 +52,7 @@ Skóre se počítá **váhově** — ne všechny problémy mají stejnou závaž
 
 | Problém | Penalizace |
 |---|---|
+| Stránka má `noindex` (mimo dev domény) | **−25** |
 | Testovací obsah v produkci (lorem ipsum, asdf…) | **−20** |
 | Chybí `<h1>` | **−15** |
 | Chybí meta description | **−15** |

@@ -24,6 +24,7 @@ class IssueType(Enum):
     FORBIDDEN_CONTENT = "forbidden_content"  # lorem ipsum atd.
     MISSING_LANG      = "missing_lang"
     MISSING_VIEWPORT  = "missing_viewport"
+    NOINDEX           = "noindex"
     OTHER             = "other"
 
 
@@ -42,6 +43,7 @@ ISSUE_LABELS = {
     IssueType.FORBIDDEN_CONTENT: "Testovací / zástupný obsah",
     IssueType.MISSING_LANG:      "Chybějící lang atribut na <html>",
     IssueType.MISSING_VIEWPORT:  "Chybějící meta viewport",
+    IssueType.NOINDEX:           "Stránka má noindex (nebude indexována Googlem)",
     IssueType.OTHER:             "Ostatní problémy",
 }
 

@@ -224,6 +224,71 @@ class TestLangAndViewport(unittest.TestCase):
         self.assertFalse(_has_issue(issues, IssueType.MISSING_VIEWPORT))
 
 
+class TestNoindex(unittest.TestCase):
+    def test_noindex_detected(self):
+        html = '<html><head><meta name="robots" content="noindex"></head><body><h1>A</h1></body></html>'
+        issues = check_structure(html, page_url="https://example.cz/")
+        self.assertTrue(_has_issue(issues, IssueType.NOINDEX))
+
+    def test_noindex_with_nofollow(self):
+        html = '<html><head><meta name="robots" content="noindex, nofollow"></head><body><h1>A</h1></body></html>'
+        issues = check_structure(html, page_url="https://example.cz/")
+        self.assertTrue(_has_issue(issues, IssueType.NOINDEX))
+
+    def test_none_directive_detected(self):
+        """'none' = ekvivalent 'noindex, nofollow'."""
+        html = '<html><head><meta name="robots" content="none"></head><body><h1>A</h1></body></html>'
+        issues = check_structure(html, page_url="https://example.cz/")
+        self.assertTrue(_has_issue(issues, IssueType.NOINDEX))
+
+    def test_googlebot_noindex_detected(self):
+        """meta name=googlebot s noindex se taky detekuje."""
+        html = '<html><head><meta name="googlebot" content="noindex"></head><body><h1>A</h1></body></html>'
+        issues = check_structure(html, page_url="https://example.cz/")
+        self.assertTrue(_has_issue(issues, IssueType.NOINDEX))
+
+    def test_nofollow_only_not_flagged(self):
+        """Samotné nofollow bez noindex se neflaguje – indexaci to neblokuje."""
+        html = '<html><head><meta name="robots" content="nofollow"></head><body><h1>A</h1></body></html>'
+        issues = check_structure(html, page_url="https://example.cz/")
+        self.assertFalse(_has_issue(issues, IssueType.NOINDEX))
+
+    def test_index_follow_ok(self):
+        html = '<html><head><meta name="robots" content="index, follow"></head><body><h1>A</h1></body></html>'
+        issues = check_structure(html, page_url="https://example.cz/")
+        self.assertFalse(_has_issue(issues, IssueType.NOINDEX))
+
+    def test_no_robots_meta_ok(self):
+        """Žádné robots meta = výchozí chování (indexovat). OK."""
+        html = "<html><head></head><body><h1>A</h1></body></html>"
+        issues = check_structure(html, page_url="https://example.cz/")
+        self.assertFalse(_has_issue(issues, IssueType.NOINDEX))
+
+    def test_dev_domain_poskireal_ignored(self):
+        """Na *.poskireal.cz je noindex záměr – nehlásíme."""
+        html = '<html><head><meta name="robots" content="noindex"></head><body><h1>A</h1></body></html>'
+        issues = check_structure(html, page_url="https://www.example.poskireal.cz/")
+        self.assertFalse(_has_issue(issues, IssueType.NOINDEX))
+
+    def test_dev_domain_cz_dev_poski_ignored(self):
+        """Na *.cz.dev.poski.com je noindex záměr – nehlásíme."""
+        html = '<html><head><meta name="robots" content="noindex"></head><body><h1>A</h1></body></html>'
+        issues = check_structure(html, page_url="https://www.example.cz.dev.poski.com/")
+        self.assertFalse(_has_issue(issues, IssueType.NOINDEX))
+
+    def test_other_poski_domain_still_checked(self):
+        """Normální poski.com (ne dev/staging) noindex check probíhá – chytne se."""
+        html = '<html><head><meta name="robots" content="noindex"></head><body><h1>A</h1></body></html>'
+        issues = check_structure(html, page_url="https://www.poski.com/")
+        self.assertTrue(_has_issue(issues, IssueType.NOINDEX))
+
+    def test_capitalized_noindex_detected(self):
+        """Velká písmena ve content – kvůli toho používáme .lower()."""
+        html = '<html><head><meta name="ROBOTS" content="NOINDEX"></head><body><h1>A</h1></body></html>'
+        issues = check_structure(html, page_url="https://example.cz/")
+        self.assertTrue(_has_issue(issues, IssueType.NOINDEX))
+
+
 class TestHomepageMeta(unittest.TestCase):
     def test_title_too_short(self):
         html = "<html><head><title>Krátký</title></head></html>"

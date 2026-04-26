@@ -16,6 +16,7 @@ Prováděné kontroly:
   9.  Testovací / zástupný obsah
   10. Chybějící lang atribut na <html>
   11. Chybějící <meta name="viewport">
+  12. <meta name="robots" content="noindex"> mimo dev domény
 """
 import copy
 import re
@@ -24,7 +25,8 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
-from config import META_TITLE_MIN, META_TITLE_MAX, META_DESC_MIN, META_DESC_MAX
+from config import (META_TITLE_MIN, META_TITLE_MAX, META_DESC_MIN, META_DESC_MAX,
+                    SKIP_NOINDEX_PATTERNS)
 from issues import Issue, IssueType
 
 _EMPTY_TAGS = ["p", "div", "span", "section", "article",
@@ -84,6 +86,18 @@ def _has_safe_rel(tag) -> bool:
     if isinstance(rel, str):
         rel = rel.split()
     return bool({"noopener", "noreferrer"} & {r.lower() for r in rel})
+
+
+def _is_dev_noindex_domain(url: str) -> bool:
+    """
+    True pokud URL je z domény kde je <meta noindex> záměr (dev/staging).
+    Tyto domény mají noindex by design — nehlásíme to jako chybu.
+    Patří sem domény definované v SKIP_NOINDEX_PATTERNS.
+    """
+    if not url:
+        return False
+    netloc = urlparse(url).netloc.lower()
+    return any(p in netloc for p in SKIP_NOINDEX_PATTERNS)
 
 
 # ── Hlavní funkce ────────────────────────────────────────────────────────────
@@ -234,6 +248,29 @@ def check_structure(html: str, page_url: str = "") -> List[Issue]:
     # 11. Meta viewport
     if not soup.find("meta", attrs={"name": re.compile(r"^viewport$", re.I)}):
         issues.append(Issue(type=IssueType.MISSING_VIEWPORT))
+
+    # 12. Noindex meta tag — kritická chyba (web nebude v Googlu)
+    # Skip pro dev/staging domény (poskireal.cz, *.cz.dev.poski.com)
+    # kde je noindex záměrný.
+    # Detekuje:
+    #   <meta name="robots" content="noindex">
+    #   <meta name="robots" content="noindex, nofollow">
+    #   <meta name="robots" content="none">     (none = noindex, nofollow)
+    #   <meta name="googlebot" content="noindex">
+    if not _is_dev_noindex_domain(page_url):
+        for robots_meta in soup.find_all(
+            "meta",
+            attrs={"name": re.compile(r"^(robots|googlebot)$", re.I)},
+        ):
+            content = robots_meta.get("content", "").lower()
+            directives = [d.strip() for d in content.split(",")]
+            if "noindex" in directives or "none" in directives:
+                meta_name = robots_meta.get("name", "robots")
+                issues.append(Issue(
+                    type=IssueType.NOINDEX,
+                    detail=f'<meta name="{meta_name}" content="{content}">',
+                ))
+                break   # stačí najít jeden - není třeba duplicitně hlásit
 
     return issues
 
