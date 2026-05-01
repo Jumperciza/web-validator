@@ -7,8 +7,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from stats        import compute_stats
 from ui           import is_valid_url, normalize_url_input
-from robots_check import _parse_robots, _get_relevant_disallows
+from robots_check import (_parse_robots, _get_relevant_disallows,
+                          CRITICAL_PREFIX)
 from sitemap      import _parse_sitemap_xml
+from issues       import Issue, IssueType
 
 
 # ── Stats ────────────────────────────────────────────────────────────────────
@@ -29,18 +31,40 @@ class TestStats(unittest.TestCase):
         self.assertEqual(s.w3c_ok, 2)
 
     def test_all_bad(self):
+        """Když má každá stránka mnoho kritických problémů, skóre je 0."""
+        # Penalizace: -25 -20 -15 -15 -15 -10 = -100 → clamp na 0
+        critical_issues = [
+            Issue(type=IssueType.NOINDEX),                                    # -25
+            Issue(type=IssueType.FORBIDDEN_CONTENT, items=['"lorem ipsum"']), # -20
+            Issue(type=IssueType.MISSING_H1),                                 # -15
+            Issue(type=IssueType.MISSING_META_DESC),                          # -15
+            Issue(type=IssueType.MISSING_VIEWPORT),                           # -15
+            Issue(type=IssueType.MISSING_LANG),                               # -10
+        ]
         results = [
-            {"w3c_category": "error", "structure_issues": []},
-            {"w3c_category": "error", "structure_issues": []},
+            {"w3c_category": "error", "w3c_errors": [],
+             "structure_issues": critical_issues},
+            {"w3c_category": "error", "w3c_errors": [],
+             "structure_issues": critical_issues},
         ]
         s = compute_stats(results)
         self.assertEqual(s.score, 0)
         self.assertEqual(s.w3c_err, 2)
 
     def test_half_bad(self):
+        """Jedna OK stránka + jedna na 0 = průměr 50."""
+        critical_issues = [
+            Issue(type=IssueType.NOINDEX),                                    # -25
+            Issue(type=IssueType.FORBIDDEN_CONTENT, items=['"lorem ipsum"']), # -20
+            Issue(type=IssueType.MISSING_H1),                                 # -15
+            Issue(type=IssueType.MISSING_META_DESC),                          # -15
+            Issue(type=IssueType.MISSING_VIEWPORT),                           # -15
+            Issue(type=IssueType.MISSING_LANG),                               # -10
+        ]
         results = [
-            {"w3c_category": "ok",    "structure_issues": []},
-            {"w3c_category": "error", "structure_issues": []},
+            {"w3c_category": "ok", "structure_issues": []},
+            {"w3c_category": "error", "w3c_errors": [],
+             "structure_issues": critical_issues},
         ]
         s = compute_stats(results)
         self.assertEqual(s.score, 50)
@@ -142,6 +166,49 @@ class TestRobotsParser(unittest.TestCase):
         self.assertIn("/gb/", d)
         self.assertIn("/all/", d)
         self.assertNotIn("/bg/", d)
+
+
+# ── Disallow: / detekce (kritická chyba) ─────────────────────────────────────
+
+class TestDisallowAll(unittest.TestCase):
+    """Detekce 'Disallow: /' která blokuje celý web pro Googlebota."""
+
+    def test_disallow_root_for_star(self):
+        """Disallow: / pro * = celý web zakázán pro všechny boty."""
+        content = """
+        User-agent: *
+        Disallow: /
+        """
+        parsed = _parse_robots(content)
+        disallows = _get_relevant_disallows(parsed)
+        self.assertIn("/", disallows)
+
+    def test_disallow_root_for_googlebot(self):
+        """Disallow: / specificky pro Googlebot."""
+        content = """
+        User-agent: Googlebot
+        Disallow: /
+        """
+        parsed = _parse_robots(content)
+        disallows = _get_relevant_disallows(parsed)
+        self.assertIn("/", disallows)
+
+    def test_disallow_subpath_not_root(self):
+        """Disallow: /admin/ nesmí být zaměněno s Disallow: / – jen subdir."""
+        content = """
+        User-agent: *
+        Disallow: /admin/
+        """
+        parsed = _parse_robots(content)
+        disallows = _get_relevant_disallows(parsed)
+        # Subdir je v listu, ale samotné lomítko ne
+        self.assertIn("/admin/", disallows)
+        self.assertNotIn("/", disallows)
+
+    def test_critical_prefix_constant(self):
+        """CRITICAL_PREFIX je definovaný a začíná hranatou závorkou."""
+        self.assertTrue(CRITICAL_PREFIX.startswith("["))
+        self.assertIn("KRITICK", CRITICAL_PREFIX)
 
 
 # ── Sitemap parser ───────────────────────────────────────────────────────────
