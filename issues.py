@@ -25,6 +25,7 @@ class IssueType(Enum):
     MISSING_LANG      = "missing_lang"
     MISSING_VIEWPORT  = "missing_viewport"
     NOINDEX           = "noindex"
+    STAGING_URL       = "staging_url"
     OTHER             = "other"
 
 
@@ -44,6 +45,7 @@ ISSUE_LABELS = {
     IssueType.MISSING_LANG:      "Chybějící lang atribut na <html>",
     IssueType.MISSING_VIEWPORT:  "Chybějící meta viewport",
     IssueType.NOINDEX:           "Stránka má noindex (nebude indexována Googlem)",
+    IssueType.STAGING_URL:       "Odkaz na staging/dev doménu v HTML",
     IssueType.OTHER:             "Ostatní problémy",
 }
 

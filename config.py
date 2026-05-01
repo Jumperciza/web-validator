@@ -49,3 +49,10 @@ SKIP_NOINDEX_PATTERNS = [
     "cz.dev.poski.com",   # *.cz.dev.poski.com  → dev prostředí Poski
     "poskireal.cz",       # *.poskireal.cz      → staging prostředí Poski
 ]
+
+# ── Patterny pro detekci staging/dev URL v HTML ─────────────────────────────
+# Když auditujeme produkční web a v HTML najdeme odkaz/obrázek/canonical
+# pointující na některou z těchto domén, je to leftover ze stagingu.
+# Sdílí stejný seznam co SKIP_NOINDEX_PATTERNS (logicky to jsou stejné domény —
+# kde je noindex záměr, tam je i URL doména která nemá vést na produkci).
+STAGING_DOMAIN_PATTERNS = SKIP_NOINDEX_PATTERNS

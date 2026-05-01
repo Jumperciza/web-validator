@@ -10,7 +10,7 @@ Nástroj pro automatizovaný technický audit webu. Zadáš URL, program projde 
 Každá stránka prochází lokální validací přes `vnu.jar` (offline, žádná data se neodesílají). Výsledky jsou rozděleny na **OK**, **Varování** a **Chyby**.
 
 ### 2. Struktura HTML
-Na každé stránce se kontroluje 12 věcí:
+Na každé stránce se kontroluje 13 věcí:
 
 | Co se kontroluje | Popis |
 |---|---|
@@ -26,8 +26,11 @@ Na každé stránce se kontroluje 12 věcí:
 | `lang` atribut | `<html lang="cs">` je důležitý pro SEO a čtečky obrazovky |
 | Meta viewport | Bez něj se stránka na mobilech zobrazuje špatně |
 | `noindex` meta tag | Detekuje `<meta name="robots" content="noindex">` na produkci |
+| Staging/dev URL v HTML | Detekuje canonical/og:image/odkazy ukazující na dev domény |
 
 > ⚠️ **Noindex check** je přeskočen pro dev/staging domény (`*.cz.dev.poski.com`, `*.poskireal.cz`), kde je `noindex` záměrný.
+
+> ⚠️ **Staging URL check** prochází `<a>`, `<img>`, `<script>`, `<link>` (canonical, alternate), `<iframe>`, `<video>`, `<form action>`, Open Graph (`og:image`, `og:url`), Twitter Cards a další. Stejně jako noindex je přeskočen pro dev domény.
 
 ### 3. Meta údaje homepage
 - **Title:** 30–60 znaků
@@ -67,6 +70,7 @@ Skóre se počítá **váhově** — ne všechny problémy mají stejnou závaž
 
 | Problém | Za každý výskyt | Max cap |
 |---|---|---|
+| Staging/dev URL v HTML | −8 | −20 |
 | Duplicitní ID | −3 | −15 |
 | HTTP odkazy (mixed content) | −2 | −15 |
 | Chybějící alt texty | −1.5 | −15 |
@@ -164,7 +168,7 @@ Pokud server selže (port zablokovaný, problém se startem), automaticky se př
 ├── report_excel.py     ← Generování Excel reportu
 ├── updater.py          ← Aktualizace vnu.jar z GitHubu
 ├── colors.py           ← Barevný terminál
-├── tests/              ← Unit testy (68 testů)
+├── tests/              ← Unit testy (83 testů)
 │   ├── test_structure_check.py
 │   └── test_other.py
 ├── requirements.txt    ← Pinnuté závislosti
@@ -179,7 +183,7 @@ Pokud server selže (port zablokovaný, problém se startem), automaticky se př
 python -m unittest discover tests/
 ```
 
-68 testů pokrývá všechny HTML kontroly, URL validaci, statistiky, robots.txt parser (včetně detekce Disallow: /) a sitemap parser.
+83 testů pokrývá všechny HTML kontroly (včetně noindex a staging URL detekce), URL validaci, statistiky, robots.txt parser (včetně detekce Disallow: /) a sitemap parser.
 
 ---
 

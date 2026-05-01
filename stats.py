@@ -48,6 +48,7 @@ _BINARY_PENALTIES: dict[IssueType, float] = {
 # Formát: (per_výskyt, max_cap)
 # Cap brání tomu aby jeden typ problému sám sestřelil skóre do 0.
 _COUNTED_PENALTIES: dict[IssueType, tuple[float, float]] = {
+    IssueType.STAGING_URL:   (8.0, 20),   # leftover dev/staging URL = SEO problém
     IssueType.DUPLICATE_ID:  (3.0, 15),
     IssueType.HTTP_LINK:     (2.0, 15),
     IssueType.MISSING_ALT:   (1.5, 15),

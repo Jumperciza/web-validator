@@ -289,6 +289,147 @@ class TestNoindex(unittest.TestCase):
         self.assertTrue(_has_issue(issues, IssueType.NOINDEX))
 
 
+class TestStagingUrl(unittest.TestCase):
+    """Detekce odkazů/zdrojů ukazujících na dev/staging domény."""
+
+    def test_canonical_to_staging_detected(self):
+        """Canonical pointující na dev doménu = SEO katastrofa."""
+        html = '''
+        <html><head>
+            <link rel="canonical" href="https://www.example.cz.dev.poski.com/page/">
+        </head><body><h1>A</h1></body></html>
+        '''
+        issues = check_structure(html, page_url="https://www.example.cz/")
+        issue = _get_issue(issues, IssueType.STAGING_URL)
+        self.assertIsNotNone(issue)
+        self.assertTrue(any("canonical" in item for item in issue.items))
+
+    def test_og_image_to_staging_detected(self):
+        html = '''
+        <html><head>
+            <meta property="og:image" content="https://example.poskireal.cz/banner.jpg">
+        </head><body><h1>A</h1></body></html>
+        '''
+        issues = check_structure(html, page_url="https://www.example.cz/")
+        issue = _get_issue(issues, IssueType.STAGING_URL)
+        self.assertIsNotNone(issue)
+        self.assertTrue(any("og:image" in item for item in issue.items))
+
+    def test_twitter_image_detected(self):
+        html = '''
+        <html><head>
+            <meta name="twitter:image" content="https://example.poskireal.cz/twit.jpg">
+        </head><body><h1>A</h1></body></html>
+        '''
+        issues = check_structure(html, page_url="https://www.example.cz/")
+        issue = _get_issue(issues, IssueType.STAGING_URL)
+        self.assertIsNotNone(issue)
+
+    def test_a_href_to_staging_detected(self):
+        html = '<h1>A</h1><a href="https://example.cz.dev.poski.com/kontakt/">Kontakt</a>'
+        issues = check_structure(html, page_url="https://www.example.cz/")
+        self.assertTrue(_has_issue(issues, IssueType.STAGING_URL))
+
+    def test_img_src_to_staging_detected(self):
+        html = '<h1>A</h1><img src="https://example.poskireal.cz/logo.png" alt="logo">'
+        issues = check_structure(html, page_url="https://www.example.cz/")
+        self.assertTrue(_has_issue(issues, IssueType.STAGING_URL))
+
+    def test_form_action_to_staging_detected(self):
+        """Formulář pošle data na staging — vážná chyba (data se ztratí)."""
+        html = '<h1>A</h1><form action="https://example.poskireal.cz/odeslat"><input></form>'
+        issues = check_structure(html, page_url="https://www.example.cz/")
+        self.assertTrue(_has_issue(issues, IssueType.STAGING_URL))
+
+    def test_iframe_to_staging_detected(self):
+        html = '<h1>A</h1><iframe src="https://example.cz.dev.poski.com/embed"></iframe>'
+        issues = check_structure(html, page_url="https://www.example.cz/")
+        self.assertTrue(_has_issue(issues, IssueType.STAGING_URL))
+
+    def test_srcset_url_to_staging_detected(self):
+        """Srcset může obsahovat víc URL oddělených čárkou — chytí se každá."""
+        html = '''<h1>A</h1>
+        <img srcset="https://example.poskireal.cz/small.jpg 1x,
+                     https://example.poskireal.cz/big.jpg 2x"
+             alt="responsive">'''
+        issues = check_structure(html, page_url="https://www.example.cz/")
+        issue = _get_issue(issues, IssueType.STAGING_URL)
+        self.assertIsNotNone(issue)
+        # Obě URL by měly být zachyceny
+        self.assertGreaterEqual(issue.count, 2)
+
+    def test_data_src_lazy_loading_detected(self):
+        """Lazy loading používá data-src — taky chytíme."""
+        html = '<h1>A</h1><img data-src="https://example.poskireal.cz/lazy.jpg" alt="x">'
+        issues = check_structure(html, page_url="https://www.example.cz/")
+        self.assertTrue(_has_issue(issues, IssueType.STAGING_URL))
+
+    def test_relative_url_not_flagged(self):
+        """Relativní URL nemají doménu — neflagujeme."""
+        html = '''
+        <h1>A</h1>
+        <a href="/jina-stranka">Vnitřní</a>
+        <img src="../images/logo.png" alt="logo">
+        <link rel="canonical" href="/aktualni-stranka">
+        '''
+        issues = check_structure(html, page_url="https://www.example.cz/")
+        self.assertFalse(_has_issue(issues, IssueType.STAGING_URL))
+
+    def test_production_url_not_flagged(self):
+        """URL na produkční doménu nebo libovolnou jinou (ne dev) je OK."""
+        html = '''
+        <h1>A</h1>
+        <a href="https://www.example.cz/jina">Vnitřní</a>
+        <img src="https://cdn.example.com/logo.png" alt="logo">
+        <link rel="canonical" href="https://www.example.cz/">
+        '''
+        issues = check_structure(html, page_url="https://www.example.cz/")
+        self.assertFalse(_has_issue(issues, IssueType.STAGING_URL))
+
+    def test_dev_domain_audit_skipped(self):
+        """Když auditujeme samotnou dev doménu, staging URL check se přeskakuje."""
+        html = '''
+        <h1>A</h1>
+        <link rel="canonical" href="https://example.poskireal.cz/page">
+        <img src="https://example.cz.dev.poski.com/img.jpg" alt="x">
+        '''
+        # Auditovaná stránka je sama na poskireal.cz → není to chyba
+        issues = check_structure(html, page_url="https://example.poskireal.cz/")
+        self.assertFalse(_has_issue(issues, IssueType.STAGING_URL))
+
+    def test_protocol_relative_url_handled(self):
+        """Protokol-relativní URL (//example.com/...) se správně rozpozná."""
+        html = '<h1>A</h1><img src="//example.poskireal.cz/img.jpg" alt="x">'
+        issues = check_structure(html, page_url="https://www.example.cz/")
+        self.assertTrue(_has_issue(issues, IssueType.STAGING_URL))
+
+    def test_multiple_findings_grouped(self):
+        """Víc nálezů na jedné stránce = jeden Issue se seznamem."""
+        html = '''
+        <h1>A</h1>
+        <link rel="canonical" href="https://example.poskireal.cz/">
+        <img src="https://example.poskireal.cz/img1.jpg" alt="x">
+        <a href="https://example.poskireal.cz/page">link</a>
+        '''
+        issues = check_structure(html, page_url="https://www.example.cz/")
+        staging_issues = [i for i in issues if i.type == IssueType.STAGING_URL]
+        self.assertEqual(len(staging_issues), 1)
+        self.assertEqual(staging_issues[0].count, 3)
+
+    def test_findings_have_context_label(self):
+        """Každý nález má v sobě kontext (canonical, og:image, <a href>, ...)."""
+        html = '''
+        <h1>A</h1>
+        <link rel="canonical" href="https://example.poskireal.cz/c">
+        <a href="https://example.poskireal.cz/a">link</a>
+        '''
+        issues = check_structure(html, page_url="https://www.example.cz/")
+        issue = _get_issue(issues, IssueType.STAGING_URL)
+        self.assertIsNotNone(issue)
+        # Položky mají formát "[<kontext>] <url>"
+        self.assertTrue(all(item.startswith("[") for item in issue.items))
+
+
 class TestHomepageMeta(unittest.TestCase):
     def test_title_too_short(self):
         html = "<html><head><title>Krátký</title></head></html>"
