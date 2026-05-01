@@ -17,6 +17,7 @@ Prováděné kontroly:
   10. Chybějící lang atribut na <html>
   11. Chybějící <meta name="viewport">
   12. <meta name="robots" content="noindex"> mimo dev domény
+  13. URL ukazující na staging/dev domény (canonical, og:image, src, href...)
 """
 import copy
 import re
@@ -26,7 +27,7 @@ from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 
 from config import (META_TITLE_MIN, META_TITLE_MAX, META_DESC_MIN, META_DESC_MAX,
-                    SKIP_NOINDEX_PATTERNS)
+                    SKIP_NOINDEX_PATTERNS, STAGING_DOMAIN_PATTERNS)
 from issues import Issue, IssueType
 
 _EMPTY_TAGS = ["p", "div", "span", "section", "article",
@@ -98,6 +99,44 @@ def _is_dev_noindex_domain(url: str) -> bool:
         return False
     netloc = urlparse(url).netloc.lower()
     return any(p in netloc for p in SKIP_NOINDEX_PATTERNS)
+
+
+def _is_staging_url(url: str) -> bool:
+    """
+    True pokud URL ukazuje na známou staging/dev doménu.
+    Pracuje s plnými URL i s relativními/protokol-relativními URL —
+    pokud doménu nelze určit, vrátí False (nebudeme hlásit relativní cesty).
+    """
+    if not url:
+        return False
+    url = url.strip()
+    # Relativní URL (/path, ./path, ../path) nebo fragmenty (#anchor) — neřešíme
+    if not url.startswith(("http://", "https://", "//")):
+        return False
+    # Protokol-relativní URL (//example.com/...) — doplníme https
+    if url.startswith("//"):
+        url = "https:" + url
+    netloc = urlparse(url).netloc.lower()
+    if not netloc:
+        return False
+    return any(p in netloc for p in STAGING_DOMAIN_PATTERNS)
+
+
+def _extract_urls_from_srcset(srcset: str) -> list[str]:
+    """
+    Z srcset hodnoty vytáhne všechny URL.
+    Formát: "url1 1x, url2 2x" nebo "url1 100w, url2 200w" nebo jen "url1, url2"
+    """
+    urls = []
+    for entry in srcset.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        # První token před mezerou = URL, ostatní = descriptor (1x, 100w, ...)
+        url = entry.split()[0] if entry.split() else ""
+        if url:
+            urls.append(url)
+    return urls
 
 
 # ── Hlavní funkce ────────────────────────────────────────────────────────────
@@ -271,6 +310,87 @@ def check_structure(html: str, page_url: str = "") -> List[Issue]:
                     detail=f'<meta name="{meta_name}" content="{content}">',
                 ))
                 break   # stačí najít jeden - není třeba duplicitně hlásit
+
+    # 13. Staging/dev URL v HTML — leftover ze stagingu po nasazení na produkci.
+    # Příklady: canonical pointující na staging, og:image z dev serveru,
+    # odkaz vedoucí na dev verzi webu, lazy obrázek z dev URL.
+    # Skip pokud je sama auditovaná stránka na dev doméně (tam je dev URL záměr).
+    if not _is_dev_noindex_domain(page_url):
+        staging_findings: list[str] = []      # ["[kontext] url", …]
+        seen_findings:    set[str]  = set()   # deduplikace
+
+        def _record(context: str, url: str) -> None:
+            """Zaznamená nález pokud je to staging URL a ještě jsme ho neviděli."""
+            if not _is_staging_url(url):
+                return
+            entry = f"[{context}] {url.strip()}"
+            if entry not in seen_findings:
+                seen_findings.add(entry)
+                staging_findings.append(entry)
+
+        # ── <a href>, <link href>, <iframe src>, <script src>, <img src>, ...
+        # Páry (selektor, atribut, kontextový popisek)
+        # Jeden tag může mít víc atributů (např. <video src + poster>)
+        _STAGING_TARGETS = [
+            ("a",      "href",   "<a href>"),
+            ("img",    "src",    "<img src>"),
+            ("img",    "data-src", "<img data-src>"),     # lazy loading
+            ("script", "src",    "<script src>"),
+            ("iframe", "src",    "<iframe src>"),
+            ("video",  "src",    "<video src>"),
+            ("video",  "poster", "<video poster>"),
+            ("audio",  "src",    "<audio src>"),
+            ("source", "src",    "<source src>"),
+            ("form",   "action", "<form action>"),
+            ("embed",  "src",    "<embed src>"),
+            ("object", "data",   "<object data>"),
+        ]
+        for tag_name, attr, ctx in _STAGING_TARGETS:
+            for el in soup.find_all(tag_name):
+                val = el.get(attr)
+                if val:
+                    _record(ctx, val)
+
+        # ── srcset atribut (může obsahovat víc URL oddělených čárkou)
+        for tag_name in ("img", "source"):
+            for el in soup.find_all(tag_name, attrs={"srcset": True}):
+                for url in _extract_urls_from_srcset(el["srcset"]):
+                    _record(f"<{tag_name} srcset>", url)
+
+        # ── <link href> — speciální zacházení kvůli rel atributu
+        # canonical má nejvyšší prioritu (zničí SEO když ukazuje na staging)
+        for link in soup.find_all("link", href=True):
+            rel = link.get("rel", [])
+            if isinstance(rel, str):
+                rel = rel.split()
+            rel_lower = [r.lower() for r in rel]
+            if "canonical" in rel_lower:
+                _record("canonical", link["href"])
+            elif "alternate" in rel_lower:
+                _record("alternate", link["href"])
+            else:
+                _record("<link href>", link["href"])
+
+        # ── Open Graph + Twitter Card meta tagy
+        # <meta property="og:image" content="https://...">
+        # <meta name="twitter:image" content="https://...">
+        for meta in soup.find_all("meta"):
+            content = meta.get("content", "")
+            if not content:
+                continue
+            prop = (meta.get("property") or "").lower()
+            name = (meta.get("name") or "").lower()
+            if prop.startswith("og:") and ("image" in prop or "url" in prop or "video" in prop):
+                _record(prop, content)
+            elif name.startswith("twitter:") and ("image" in name or "url" in name):
+                _record(name, content)
+
+        if staging_findings:
+            issues.append(Issue(
+                type=IssueType.STAGING_URL,
+                items=staging_findings[:50],   # limit v reportu (count je celkem)
+                count=len(staging_findings),
+            ))
 
     return issues
 

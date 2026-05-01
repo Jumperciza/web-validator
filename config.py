@@ -49,3 +49,10 @@ SKIP_NOINDEX_PATTERNS = [
     "dev.firma.example",   # *.dev.firma.example  → dev prostředí firma
     "firma-staging.example",       # *.firma-staging.example      → staging prostředí firma
 ]
+
+# ── Patterny pro detekci staging/dev URL v HTML ─────────────────────────────
+# Když auditujeme produkční web a v HTML najdeme odkaz/obrázek/canonical
+# pointující na některou z těchto domén, je to leftover ze stagingu.
+# Sdílí stejný seznam co SKIP_NOINDEX_PATTERNS (logicky to jsou stejné domény —
+# kde je noindex záměr, tam je i URL doména která nemá vést na produkci).
+STAGING_DOMAIN_PATTERNS = SKIP_NOINDEX_PATTERNS

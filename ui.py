@@ -167,7 +167,8 @@ def print_banner() -> None:
                  "externí odkazy bez target/_blank/noopener",
                  "testovací/zástupný obsah (lorem ipsum, asdf…)",
                  "lang atribut na <html>", "meta viewport",
-                 "noindex meta tag (mimo dev domény)"]:
+                 "noindex meta tag (mimo dev domény)",
+                 "URL ukazující na staging/dev domény (canonical, og:image, src…)"]:
         gray(f"       - {item}"); print()
     print(f"    "); ok("3."); print(" Meta title a description délka (jen homepage)")
     print(f"    "); ok("4."); print(" Kontrola robots.txt – Disallow: / a blokování CSS/JS pro Googlebot")
