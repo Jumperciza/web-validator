@@ -33,7 +33,8 @@ from config          import (USER_AGENT, ACCEPT_LANGUAGE, FETCH_TIMEOUT,
                              DEFAULT_MAX_PAGES)
 from crawler         import crawl_site
 from sitemap         import fetch_sitemap_urls
-from robots_check    import check_robots_js_css, check_user_pages
+from robots_check    import (check_robots_js_css, check_user_pages,
+                             CRITICAL_PREFIX as ROBOTS_CRITICAL_PREFIX)
 import validator_w3c as w3c_mod
 from structure_check import check_structure, check_homepage_meta
 from report_excel    import write_report
@@ -384,7 +385,12 @@ def main():
         gray("  robots.txt check přeskočen (interní/dev doména)"); print()
     elif robots_issues:
         for issue in robots_issues:
-            warn("  [!] "); print(issue)
+            if issue.startswith(ROBOTS_CRITICAL_PREFIX):
+                # Kritická chyba (Disallow: / blokuje celý web) — červeně
+                clean_msg = issue[len(ROBOTS_CRITICAL_PREFIX):]
+                err("  [!!] "); print(clean_msg)
+            else:
+                warn("  [!] "); print(issue)
     else:
         ok("  [✓]"); print(" robots.txt neblokuje JS/CSS")
 

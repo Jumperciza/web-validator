@@ -8,6 +8,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 from issues import Issue, IssueType
+from robots_check import CRITICAL_PREFIX as ROBOTS_CRITICAL_PREFIX
 from stats  import compute_stats
 
 # ── Paleta ───────────────────────────────────────────────────────────────────
@@ -312,7 +313,7 @@ def _write_failed_pages(ws, row: int, results: list) -> int:
 
 def _write_robots_section(ws, row: int, robots_issues: list, robots_skipped: bool) -> int:
     row = _spacer(ws, row)
-    _title_row(ws, row, "ROBOTS.TXT – BLOKOVÁNÍ JS/CSS (GOOGLEBOT)", SUB); row += 1
+    _title_row(ws, row, "ROBOTS.TXT – BLOKOVÁNÍ INDEXACE / JS / CSS (GOOGLEBOT)", SUB); row += 1
 
     if robots_skipped:
         ws.merge_cells(f"A{row}:G{row}")
@@ -326,7 +327,7 @@ def _write_robots_section(ws, row: int, robots_issues: list, robots_skipped: boo
     elif not robots_issues:
         ws.merge_cells(f"A{row}:G{row}")
         ws.cell(row=row, column=1,
-                value="✓ JS a CSS nejsou blokovány – Googlebot může renderovat stránku")
+                value="✓ Robots.txt neblokuje indexaci, JS ani CSS – Googlebot může renderovat stránku")
         ws.cell(row=row, column=1).font = _bf(color=G_FT, bold=True)
         ws.row_dimensions[row].height = 20
         return row + 1
@@ -339,8 +340,21 @@ def _write_robots_section(ws, row: int, robots_issues: list, robots_skipped: boo
     row += 1
     for issue in robots_issues:
         ws.merge_cells(f"A{row}:G{row}")
-        _dc(ws, row, 1, issue, bg=R_BG, ft=R_FT)
-        ws.row_dimensions[row].height = 20; row += 1
+        is_critical = issue.startswith(ROBOTS_CRITICAL_PREFIX)
+        if is_critical:
+            # Kritická chyba — Disallow: / blokuje celý web.
+            # Větší písmo, tučné, výraznější červená, vyšší řádek.
+            clean_msg = "⛔ KRITICKÉ: " + issue[len(ROBOTS_CRITICAL_PREFIX):]
+            cell = ws.cell(row=row, column=1, value=clean_msg)
+            cell.font = Font(name="Arial", bold=True, color=R_FT, size=11)
+            cell.fill = _fill(R_BG)
+            cell.alignment = _al("left")
+            cell.border = _brd()
+            ws.row_dimensions[row].height = 28
+        else:
+            _dc(ws, row, 1, issue, bg=R_BG, ft=R_FT)
+            ws.row_dimensions[row].height = 20
+        row += 1
 
     return row
 

@@ -33,8 +33,9 @@ Na každé stránce se kontroluje 12 věcí:
 - **Title:** 30–60 znaků
 - **Meta description:** 70–160 znaků
 
-### 4. robots.txt – blokování CSS/JS
-Zkontroluje jestli `robots.txt` nebrání Googlebotu číst `.js` nebo `.css` soubory.
+### 4. robots.txt – kontrola indexace
+- **Kritická kontrola:** detekuje `Disallow: /` pro Googlebot nebo `*` — to znamená že je celý web zablokovaný pro vyhledávače. Klasický staging artefakt který se zapomene změnit při nasazení na produkci.
+- **JS/CSS blokování:** zkontroluje jestli `robots.txt` nebrání Googlebotu číst `.js` nebo `.css` soubory (bez nich Google nedokáže korektně renderovat stránku).
 > ⚠️ Přeskočeno pro interní/dev prostředí (`poskireal.cz`, `poski.com`, `.cz.dev.`).
 
 ### 5. Uživatelská sekce
@@ -163,7 +164,7 @@ Pokud server selže (port zablokovaný, problém se startem), automaticky se př
 ├── report_excel.py     ← Generování Excel reportu
 ├── updater.py          ← Aktualizace vnu.jar z GitHubu
 ├── colors.py           ← Barevný terminál
-├── tests/              ← Unit testy (53 testů)
+├── tests/              ← Unit testy (68 testů)
 │   ├── test_structure_check.py
 │   └── test_other.py
 ├── requirements.txt    ← Pinnuté závislosti
@@ -178,7 +179,7 @@ Pokud server selže (port zablokovaný, problém se startem), automaticky se př
 python -m unittest discover tests/
 ```
 
-53 testů pokrývá všechny HTML kontroly, URL validaci, statistiky, robots.txt parser a sitemap parser.
+68 testů pokrývá všechny HTML kontroly, URL validaci, statistiky, robots.txt parser (včetně detekce Disallow: /) a sitemap parser.
 
 ---
 
@@ -191,7 +192,7 @@ Report se ukládá do složky `excel reporty/`. Obsahuje:
 3. **W3C validace** – stránky s problémy jako klikatelné odkazy
 4. **HTML struktura** – problémy seskupené podle typu
 5. **Nedostupné stránky** – s chybovou hláškou
-6. **robots.txt** – blokování JS/CSS
+6. **robots.txt** – Disallow: / a blokování JS/CSS
 7. **Uživatelská sekce** – status `/uzivatel/`
 
 ---

@@ -4,6 +4,9 @@ Robots.txt kontrola + detekce uživatelské sekce.
 robots.txt check:
   - Přeskočí se pro domény obsahující poskireal.cz nebo poski.com
     (interní/dev prostředí kde robots.txt nemá produkční hodnotu).
+  - KRITICKÉ: detekuje `Disallow: /` pro Googlebot nebo * — to znamená
+    že celý web je zablokován pro vyhledávače (klasický staging artefakt
+    který se zapomene odstranit při nasazení na produkci).
   - Hledá pravidla pro Googlebot nebo * (all) která blokují .js/.css soubory
     nebo WordPress asset složky (/wp-content/, /wp-includes/).
 
@@ -29,6 +32,11 @@ _SKIP_ROBOTS_PATTERNS = SKIP_ROBOTS_PATTERNS
 
 # Cesta ke kontrole existence uživatelské sekce
 _USER_PATH = "/uzivatel/"
+
+# Prefix pro označení kritických chyb v issues listu.
+# Volající kód (terminál, Excel) může podle prefixu rozpoznat závažnost
+# a zvýraznit kritické chyby silněji než ostatní robots.txt problémy.
+CRITICAL_PREFIX = "[KRITICKÉ] "
 
 # Regex vzory pro detekci blokování JS/CSS v Disallow hodnotě
 _JS_BLOCK_RE  = re.compile(r"(\.js[\$\?\*]?$|/\*\.js|\*\.js|\bjs\b/)", re.I)
@@ -135,9 +143,26 @@ def check_robots_js_css(base_url: str) -> tuple[list[str], bool]:
     disallows = _get_relevant_disallows(parsed)
 
     issues: list[str] = []
+
+    # ── KRITICKÁ kontrola: Disallow: / blokuje celý web ──────────────────────
+    # Pokud robots.txt obsahuje pro Googlebot nebo * pravidlo "Disallow: /",
+    # znamená to že celý web je zakázán pro vyhledávače = web zmizí z Googlu.
+    # Klasický staging artefakt (na dev má být schválně, na produkci je to chyba).
+    # Hlásíme tu samou chybu jen jednou — netřeba ji duplikovat
+    # pro Googlebot i * pokud je v obou.
+    if any(p.strip() == "/" for p in disallows):
+        issues.append(
+            CRITICAL_PREFIX +
+            "Disallow: / blokuje celý web pro vyhledávače "
+            "(Googlebot nebo *) – web nebude indexován"
+        )
+
+    # ── JS/CSS blokování (méně závažné, ale stále problém pro SEO) ───────────
     for path in disallows:
         if not path:
             continue   # Prázdné Disallow = nic neblokuje
+        if path.strip() == "/":
+            continue   # Už zachyceno výše jako kritická chyba
         if _JS_BLOCK_RE.search(path):
             issues.append(f"Blokování JavaScriptu (Googlebot): Disallow: {path}")
         if _CSS_BLOCK_RE.search(path):

@@ -170,7 +170,7 @@ def print_banner() -> None:
                  "noindex meta tag (mimo dev domény)"]:
         gray(f"       - {item}"); print()
     print(f"    "); ok("3."); print(" Meta title a description délka (jen homepage)")
-    print(f"    "); ok("4."); print(" Kontrola robots.txt – blokování CSS/JS pro Googlebot")
+    print(f"    "); ok("4."); print(" Kontrola robots.txt – Disallow: / a blokování CSS/JS pro Googlebot")
     print(f"    "); ok("5."); print(" Kontrola existence uživatelské sekce (/uzivatel/)")
     info("=" * 62); print()
     print()
