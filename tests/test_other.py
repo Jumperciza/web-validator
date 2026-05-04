@@ -244,5 +244,31 @@ class TestSitemapParser(unittest.TestCase):
         self.assertIsInstance(sitemaps, list)
 
 
+# ── Hybrid sitemap → crawler ─────────────────────────────────────────────────
+
+class TestHybridCrawl(unittest.TestCase):
+    """
+    Strukturální testy pro hybrid režim (sitemap → crawler s málo URL).
+    Síťové testy nemají smysl bez mockování — testujeme aspoň že rozhraní
+    je správně a konstanty existují.
+    """
+
+    def test_sitemap_min_pages_constant(self):
+        """Práh musí být v configu a být rozumné kladné číslo."""
+        from config import SITEMAP_MIN_PAGES
+        self.assertIsInstance(SITEMAP_MIN_PAGES, int)
+        self.assertGreater(SITEMAP_MIN_PAGES, 0)
+        self.assertLess(SITEMAP_MIN_PAGES, 100)   # rozumný horní strop
+
+    def test_crawl_site_accepts_seed_urls(self):
+        """crawl_site musí umět přijmout seed_urls kwarg."""
+        import inspect
+        from crawler import crawl_site
+        sig = inspect.signature(crawl_site)
+        self.assertIn("seed_urls", sig.parameters)
+        # Default by měl být None (nebo aspoň falsy)
+        self.assertFalse(sig.parameters["seed_urls"].default)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from colors          import ok, warn, err, info, gray, blue, pocet_problemu
 from config          import (USER_AGENT, ACCEPT_LANGUAGE, FETCH_TIMEOUT,
                              FETCH_WORKERS, LOCAL_WORKERS, FETCH_DELAY,
-                             DEFAULT_MAX_PAGES)
+                             DEFAULT_MAX_PAGES, SITEMAP_MIN_PAGES)
 from crawler         import crawl_site
 from sitemap         import fetch_sitemap_urls
 from robots_check    import (check_robots_js_css, check_user_pages,
@@ -339,25 +339,50 @@ def main():
     source_label : str       = ""
 
     info("  [SITEMAP]"); print(" Hledám sitemap.xml...")
+    sm_pages: list[str] = []
     try:
         sm_pages = fetch_sitemap_urls(url, max_urls=args.max_pages)
-        if sm_pages:
+        if sm_pages and len(sm_pages) >= SITEMAP_MIN_PAGES:
+            # Sitemap má dostatek URL — použijeme ji a crawler přeskočíme.
             ok("  [SITEMAP]"); print(f" Nalezeno {len(sm_pages)} URL – crawler přeskočen.")
             pages        = sm_pages
             source_label = f"sitemap.xml ({len(sm_pages)} URL)"
+        elif sm_pages:
+            # Sitemap nalezena, ale obsahuje málo URL (pod prahem).
+            # Použijeme ji jako seed a doplníme crawlerem.
+            warn(f"  [!] Sitemap má jen {len(sm_pages)} URL "
+                 f"(práh: {SITEMAP_MIN_PAGES}) – doplňuji crawlerem."); print()
         else:
             gray("  Sitemap nenalezena nebo prázdná."); print()
     except Exception as e:
         warn(f"  [!] Chyba při čtení sitemap: {e}"); print()
 
+    # Crawler — buď samostatně (sitemap nic nenašla), nebo doplnění málo URL.
     if not pages:
-        gray("  Spouštím crawler..."); print()
-        try:
-            pages        = crawl_site(url, max_pages=args.max_pages, delay=args.delay)
-            source_label = f"crawler ({len(pages)} URL)"
-        except Exception as e:
-            err(f"  [✗] Crawler selhal: {e}"); print()
-            pages = []
+        if sm_pages:
+            # Hybrid: sitemap URL jako seedy, crawler hledá zbytek.
+            gray(f"  Spouštím crawler s {len(sm_pages)} URL ze sitemapy jako seed..."); print()
+            try:
+                extra = crawl_site(url, max_pages=args.max_pages,
+                                   delay=args.delay, seed_urls=sm_pages)
+                pages = sm_pages + extra
+                source_label = (f"sitemap+crawler "
+                                f"({len(sm_pages)} ze sitemap, "
+                                f"{len(extra)} z crawleru)")
+            except Exception as e:
+                err(f"  [✗] Crawler selhal: {e}"); print()
+                # Zachráníme aspoň URL ze sitemap
+                pages = sm_pages
+                source_label = f"sitemap.xml ({len(sm_pages)} URL, crawler selhal)"
+        else:
+            # Klasický crawler — sitemap nebyla, jdeme od start_url.
+            gray("  Spouštím crawler..."); print()
+            try:
+                pages        = crawl_site(url, max_pages=args.max_pages, delay=args.delay)
+                source_label = f"crawler ({len(pages)} URL)"
+            except Exception as e:
+                err(f"  [✗] Crawler selhal: {e}"); print()
+                pages = []
 
     print()
 

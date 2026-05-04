@@ -204,9 +204,13 @@ Report se ukládá do složky `excel reporty/`. Obsahuje:
 ## ⚙️ Jak funguje crawling
 
 1. Hledá `Sitemap:` direktivu v `robots.txt`
-2. Zkouší `/sitemap.xml`, `/sitemap_index.xml`
+2. Zkouší `/sitemap.xml`, `/sitemap_index.xml`, `/sitemap-index.xml`
 3. Rekurzivně rozbalí sitemap index (max hloubka 3)
-4. Pokud sitemap neexistuje → spustí crawler (paralelně, respektuje robots.txt)
+4. Rozhoduje podle počtu nalezených URL:
+   - **≥ 10 URL** (`SITEMAP_MIN_PAGES`) → použije se jen sitemap, crawler se přeskočí
+   - **1–9 URL** → **hybrid režim** – sitemap URL slouží jako seed, crawler doplní zbytek webu (typicky neúplná sitemap)
+   - **0 URL** → klasický crawler od homepage (paralelně, respektuje robots.txt)
+5. Pokud sitemap obsahuje URL z cizích domén (typicky leftover po migraci), zobrazí se varování
 
 ---
 
