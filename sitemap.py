@@ -218,6 +218,8 @@ def fetch_sitemap_urls(base_url: str, max_urls: int = 500) -> list[str]:
     # ── Filtrace – používáme _same_domain, _ignore, _url_key importované nahoře ──
     seen_keys : set[str] = set()
     filtered  : list[str] = []
+    foreign_domains : set[str] = set()   # nasbíráme cizí domény pro warning
+    foreign_count   : int = 0
 
     for url in all_page_urls:
         try:
@@ -226,6 +228,11 @@ def fetch_sitemap_urls(base_url: str, max_urls: int = 500) -> list[str]:
             # Porovnání domény
             url_netloc = urlparse(url).netloc.lower().removeprefix("www.")
             if url_netloc != base_netloc:
+                # URL z jiné domény — typicky leftover po migraci.
+                # Zaznamenáme pro warning, ale neimportujeme.
+                if url_netloc:
+                    foreign_domains.add(url_netloc)
+                    foreign_count += 1
                 continue
             if _ignore(url):
                 continue
@@ -237,5 +244,14 @@ def fetch_sitemap_urls(base_url: str, max_urls: int = 500) -> list[str]:
                 break
         except Exception:
             continue   # Přeskočíme problematickou URL
+
+    # Warning pokud sitemap obsahovala URL z cizích domén — typicky
+    # leftover po migraci webu, sitemap nebyla aktualizována.
+    if foreign_count:
+        domains_preview = ", ".join(sorted(foreign_domains)[:3])
+        if len(foreign_domains) > 3:
+            domains_preview += f", … (+{len(foreign_domains) - 3} dalších)"
+        warn(f"  [!] Sitemap obsahuje {foreign_count} URL z cizích domén "
+             f"({domains_preview}) – nezahrnuto do auditu"); print()
 
     return filtered

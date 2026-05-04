@@ -24,6 +24,7 @@ MIN_CRAWL_DELAY = 0.2  # minimální pauza v crawleru
 # ── Limity ───────────────────────────────────────────────────────────────────
 DEFAULT_MAX_PAGES = 500
 SITEMAP_MAX_DEPTH = 3    # max hloubka sitemap index rekurze
+SITEMAP_MIN_PAGES = 10   # pokud sitemap najde méně URL než tohle, doplní se crawlerem
 
 # ── Prahy pro meta tagy ──────────────────────────────────────────────────────
 META_TITLE_MIN = 30

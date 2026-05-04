@@ -70,10 +70,16 @@ def _fetch(session: requests.Session, url: str) -> tuple:
 
 
 def crawl_site(start_url: str, max_pages: int = 500,
-               delay: float = 1.0, timeout: int = 15) -> list:
+               delay: float = 1.0, timeout: int = 15,
+               seed_urls: list | None = None) -> list:
     """
     Crawluje web paralelně.
     delay = minimální pauza mezi dávkami (přepíše MIN_DELAY pokud je vyšší).
+
+    seed_urls = volitelný seznam URL které jsou už známé (např. z sitemap).
+    Crawler tyto URL projde aby z nich vytáhl odkazy a objevil další stránky,
+    ale nepřidá je do návratové hodnoty (volající kód je už má).
+    Návratová hodnota tedy obsahuje JEN nově nalezené stránky.
     """
     parsed = urlparse(start_url)
     if not parsed.scheme:
@@ -109,7 +115,29 @@ def crawl_site(start_url: str, max_pages: int = 500,
     if effective_delay != delay:
         gray(f"  (robots.txt nastavuje crawl-delay: {effective_delay}s)"); print()
 
-    queue    = deque([_normalize(start_url)])
+    # Připrav seed_set — URL z parametru seed_urls, které jsou už nalezené
+    # jinou cestou (typicky sitemap). Tyto URL crawler stáhne a vytáhne z nich
+    # odkazy, ale nepřidá je do `found` aby se neduplikovaly.
+    seed_set: set = set()
+    if seed_urls:
+        for seed in seed_urls:
+            seed_set.add(_url_key(_normalize(seed)))
+
+    # Inicializace fronty: pokud máme seedy, použij je. Jinak start_url.
+    if seed_urls:
+        # Normalizujeme každý seed; deduplikujeme přes seen-key
+        initial = []
+        seen_init: set = set()
+        for s in seed_urls:
+            n = _normalize(s)
+            k = _url_key(n)
+            if k not in seen_init:
+                seen_init.add(k)
+                initial.append(n)
+        queue = deque(initial)
+    else:
+        queue = deque([_normalize(start_url)])
+
     seen     = set()
     seen_lock = threading.Lock()
     found    = []
@@ -124,14 +152,18 @@ def crawl_site(start_url: str, max_pages: int = 500,
                 if html is None:
                     continue
 
-                with seen_lock:
-                    found.append(url)
+                # Pokud URL byla seed (už ji volající má), do found ji nedáváme,
+                # jen z ní vytáhneme odkazy.
+                is_seed = _url_key(url) in seed_set
+                if not is_seed:
+                    with seen_lock:
+                        found.append(url)
 
-                sys.stdout.write("  "); sys.stdout.flush()
-                ok("[OK]")
-                sys.stdout.write(f" {url}\n"); sys.stdout.flush()
+                    sys.stdout.write("  "); sys.stdout.flush()
+                    ok("[OK]")
+                    sys.stdout.write(f" {url}\n"); sys.stdout.flush()
 
-                # Extrahuj linky
+                # Extrahuj linky (i ze seed URL — to je celý smysl seed režimu)
                 soup = BeautifulSoup(html, "html.parser")
                 for a in soup.find_all("a", href=True):
                     nxt = _normalize(urljoin(url, a["href"].strip()))
@@ -144,11 +176,16 @@ def crawl_site(start_url: str, max_pages: int = 500,
                                 new_links.append(nxt)
         return new_links
 
-    # Hlavní smyčka – zpracovává dávky
-    while queue and len(found) < max_pages:
+    # Hlavní smyčka – zpracovává dávky.
+    # Limit max_pages se vztahuje na CELKOVÝ počet stránek (seed + nově nalezené).
+    # Volající si seed URL drží, takže "nové" URL můžeme přidávat jen do
+    # rozdílu max_pages - len(seed_set).
+    seed_count = len(seed_set)
+    while queue and (len(found) + seed_count) < max_pages:
         # Připrav dávku URL ke stažení
         batch = []
-        while queue and len(batch) < WORKERS and len(found) + len(batch) < max_pages:
+        while (queue and len(batch) < WORKERS
+               and (len(found) + seed_count + len(batch)) < max_pages):
             url = queue.popleft()
             key = _url_key(url)
 
