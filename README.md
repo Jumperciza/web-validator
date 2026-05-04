@@ -168,7 +168,7 @@ Pokud server selže (port zablokovaný, problém se startem), automaticky se př
 ├── report_excel.py     ← Generování Excel reportu
 ├── updater.py          ← Aktualizace vnu.jar z GitHubu
 ├── colors.py           ← Barevný terminál
-├── tests/              ← Unit testy (83 testů)
+├── tests/              ← Unit testy (85 testů)
 │   ├── test_structure_check.py
 │   └── test_other.py
 ├── requirements.txt    ← Pinnuté závislosti
@@ -183,7 +183,7 @@ Pokud server selže (port zablokovaný, problém se startem), automaticky se př
 python -m unittest discover tests/
 ```
 
-83 testů pokrývá všechny HTML kontroly (včetně noindex a staging URL detekce), URL validaci, statistiky, robots.txt parser (včetně detekce Disallow: /) a sitemap parser.
+85 testů pokrývá všechny HTML kontroly (včetně noindex a staging URL detekce), URL validaci, statistiky, robots.txt parser (včetně detekce Disallow: /), sitemap parser a hybrid crawl logiku.
 
 ---
 
