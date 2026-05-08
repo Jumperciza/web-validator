@@ -9,6 +9,8 @@ Dva režimy:
      Funguje i když server selže, ale pomalý (~1s JVM startup každé stránce).
 
 Automatický fallback: pokud server mód selže při startu, přepneme na subprocess.
+Pokud server zemře během běhu (OOM, crash), detekujeme to přes poll() check
+a od té chvíle používáme subprocess pro všechny zbývající stránky.
 """
 import atexit
 import json
@@ -16,6 +18,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -32,6 +35,8 @@ vnu_jar: str = ""
 _server_proc: subprocess.Popen | None = None
 _server_port: int                     = 0
 _server_lock = threading.Lock()
+# Flag aby se warning o smrti serveru vypsal jen jednou (z více threadů)
+_server_death_reported: bool = False
 
 
 def find_vnu_jar() -> str:
@@ -94,7 +99,7 @@ def start_server(jar_path: str) -> bool:
 
     Server běží na pozadí a ukončí se při exitu programu (atexit hook).
     """
-    global _server_proc, _server_port
+    global _server_proc, _server_port, _server_death_reported
 
     with _server_lock:
         if _server_proc is not None and _server_proc.poll() is None:
@@ -122,6 +127,7 @@ def start_server(jar_path: str) -> bool:
             return False
 
         _server_port = port
+        _server_death_reported = False   # Reset pro případ restartu
 
         # Registruj cleanup při exitu
         atexit.register(stop_server)
@@ -147,12 +153,53 @@ def stop_server() -> None:
         _server_port = 0
 
 
+def _check_server_alive() -> bool:
+    """
+    Zkontroluje jestli server proces stále běží.
+    Pokud zemřel (OOM, kill, crash), vynuluje _server_port aby další volání
+    šla rovnou na subprocess, a vypíše varování (jednou).
+
+    Vrací:
+      True  – server běží, můžeme pokračovat HTTP requestem
+      False – server je mrtvý, voláme subprocess fallback
+    """
+    global _server_port, _server_death_reported
+
+    with _server_lock:
+        if _server_port == 0:
+            return False   # Server nikdy nestartoval, nebo už byl zastaven
+        if _server_proc is None:
+            _server_port = 0
+            return False
+        # poll() vrátí None = běží, jakákoli hodnota = už skončil
+        if _server_proc.poll() is None:
+            return True
+
+        # Server proces je mrtvý — od teď používáme subprocess fallback
+        _server_port = 0
+        if not _server_death_reported:
+            _server_death_reported = True
+            # Warning printujeme bez locku držení — print sám má vlastní synchronizaci
+            should_report = True
+        else:
+            should_report = False
+
+    if should_report:
+        sys.stdout.write("\n  ")
+        warn("[!]")
+        sys.stdout.write(" vnu.jar server přestal odpovídat – přepínám na subprocess "
+                         "(zbytek validace bude pomalejší).\n")
+        sys.stdout.flush()
+
+    return False
+
+
 def _validate_via_server(html_bytes: bytes) -> dict | None:
     """
     Pošle HTML na běžící vnu server přes HTTP.
     Vrátí raw JSON dict nebo None při chybě → fallback na subprocess.
     """
-    if _server_port == 0:
+    if not _check_server_alive():
         return None
     try:
         resp = requests.post(
@@ -164,6 +211,9 @@ def _validate_via_server(html_bytes: bytes) -> dict | None:
         if resp.status_code == 200:
             return resp.json()
     except Exception:
+        # Connection refused / timeout / atd. — tichý fallback na subprocess.
+        # Pokud je důvodem mrtvý server, příští volání to zachytí v _check_server_alive
+        # a vypíše varování.
         return None
     return None
 
@@ -258,12 +308,12 @@ def validate(html_bytes: bytes, jar: str = "") -> dict:
         return {"category": "validator_error", "warnings": [], "errors": [],
                 "error_msg": "vnu.jar nenalezen"}
 
-    # Zkus server mód (pokud je server spuštěný)
+    # Zkus server mód (pokud je server spuštěný a živý)
     if _server_port != 0:
         data = _validate_via_server(html_bytes)
         if data is not None:
             return _build_result(data.get("messages", []))
-        # Server neodpovídá — spadneme na subprocess
+        # Server neodpovídá nebo zemřel — spadneme na subprocess
 
     # Subprocess fallback
     return _validate_via_subprocess(html_bytes, jar_path)
