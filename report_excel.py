@@ -172,7 +172,14 @@ def _write_homepage_meta(ws, row: int, results: list) -> int:
     row = _spacer(ws, row)
     _title_row(ws, row, "META – HOMEPAGE", SUB); row += 1
 
-    homepage_meta = results[0]["homepage_meta"] if results else []
+    # Najdi první výsledek s neprázdnou homepage_meta (může být kdekoli v results,
+    # ne nutně na indexu 0 — sitemap může mít homepage uprostřed nebo úplně chybět).
+    # main.py nastaví homepage_meta jen na URL která odpovídá startovní URL auditu.
+    homepage_meta = next(
+        (r["homepage_meta"] for r in results if r.get("homepage_meta")),
+        []
+    )
+
     if not homepage_meta:
         ws.merge_cells(f"A{row}:G{row}")
         ws.cell(row=row, column=1, value="Žádná data").font = _bf(color="888888")

@@ -55,6 +55,33 @@ def fetch_html(session: requests.Session, url: str, timeout: int = FETCH_TIMEOUT
         return None, None, str(e)
 
 
+def _normalize_for_match(url: str) -> str:
+    """
+    Normalizuje URL pro porovnání identity stránky:
+      - lowercase netloc
+      - odstraní www. prefix
+      - odstraní trailing slash z path
+      - ignoruje scheme, query, fragment
+    Vrací řetězec ve tvaru "netloc+path", např. "example.cz/produkty".
+    """
+    p = urlparse(url)
+    netloc = p.netloc.lower().removeprefix("www.")
+    path   = p.path.rstrip("/")
+    return f"{netloc}{path}"
+
+
+def _is_audit_root(url: str, base_url: str) -> bool:
+    """
+    True pokud URL odpovídá startovní URL auditu (po normalizaci).
+    Používá se k rozhodnutí kdy spouštět homepage meta kontrolu —
+    místo dříve používaného `idx == 1`, který byl křehký
+    (sitemap může mít první URL třeba blog post místo homepage).
+    """
+    if not base_url:
+        return False
+    return _normalize_for_match(url) == _normalize_for_match(base_url)
+
+
 def _score_color_fn(score: int):
     if score >= 80: return ok
     if score >= 60: return warn
@@ -107,7 +134,7 @@ def _print_result(idx: int, total: int, url: str, w3c: dict,
         sys.stdout.flush()
 
 
-def validate_pages(pages: list, jar_path: str = "") -> list:
+def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     total    = len(pages)
@@ -176,9 +203,12 @@ def validate_pages(pages: list, jar_path: str = "") -> list:
         t1.start(); t2.start()
         t1.join();  t2.join()
 
+        # Homepage meta – kontrola se spouští jen na URL která odpovídá startu auditu.
+        # Dříve to bylo `if idx == 1` což selhávalo když sitemap dala homepage
+        # někde uprostřed nebo úplně chyběla.
         homepage_meta = []
         try:
-            if idx == 1:
+            if _is_audit_root(url, start_url):
                 homepage_meta = check_homepage_meta(html_text)
         except Exception as e:
             homepage_meta = [f"Chyba při kontrole meta: {e}"]
@@ -430,7 +460,7 @@ def main():
     info("--- VALIDACE + KONTROLA HTML START ---")
     ok(f" ({len(pages)} stránek)"); print("\n")
 
-    results = validate_pages(pages, jar_path=jar)
+    results = validate_pages(pages, jar_path=jar, start_url=url)
 
     # Server už není potřeba — ukončíme ho
     stop_server()
