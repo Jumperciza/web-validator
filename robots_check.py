@@ -4,6 +4,9 @@ Robots.txt kontrola + detekce uživatelské sekce.
 robots.txt check:
   - Přeskočí se pro domény obsahující poskireal.cz nebo poski.com
     (interní/dev prostředí kde robots.txt nemá produkční hodnotu).
+  - Přeskočí se i pro lokální hosty (localhost, 127.0.0.1, *.local…) —
+    lokální dev servery zřídka mají smysluplný robots.txt a kontrola
+    by jen vracela falešné poplachy.
   - KRITICKÉ: detekuje `Disallow: /` pro Googlebot nebo * — to znamená
     že celý web je zablokován pro vyhledávače (klasický staging artefakt
     který se zapomene odstranit při nasazení na produkci).
@@ -21,6 +24,7 @@ import requests
 
 from config import (USER_AGENT, ACCEPT_LANGUAGE, DEFAULT_TIMEOUT,
                     SKIP_ROBOTS_PATTERNS)
+from ui import is_local_url
 
 UA      = USER_AGENT
 TIMEOUT = DEFAULT_TIMEOUT
@@ -47,8 +51,14 @@ _WP_BLOCK_RE  = re.compile(r"/wp-(content|includes)/", re.I)
 # ── Interní pomocné funkce ────────────────────────────────────────────────────
 
 def _should_skip(url: str) -> bool:
+    """
+    True pokud doménu vůbec nebudeme kontrolovat — interní/dev prostředí
+    nebo lokální host (localhost, 127.0.0.1, *.local atd.).
+    """
     netloc = urlparse(url).netloc.lower()
-    return any(p in netloc for p in _SKIP_ROBOTS_PATTERNS)
+    if any(p in netloc for p in _SKIP_ROBOTS_PATTERNS):
+        return True
+    return is_local_url(url)
 
 
 def _parse_robots(content: str) -> dict[str, list[str]]:
@@ -117,7 +127,7 @@ def check_robots_js_css(base_url: str) -> tuple[list[str], bool]:
 
     Vrátí (issues: list[str], skipped: bool).
       issues   – seznam textových problémů; prázdný = vše OK
-      skipped  – True pokud doména je v _SKIP_ROBOTS_PATTERNS
+      skipped  – True pokud se kontrola přeskočila (interní/dev/lokální host)
     """
     if _should_skip(base_url):
         return [], True
@@ -189,7 +199,13 @@ def check_user_pages(base_url: str) -> list[dict]:
 
     Vrátí seznam s jedním dict (list pro kompatibilitu s report_excel.py):
       [{path, url, status_code, exists}]
+
+    Pro lokální hosty (localhost, 127.0.0.1, *.local…) vrací prázdný list —
+    detekce uživatelské sekce na lokálním vývojovém serveru nemá smysl.
     """
+    if is_local_url(base_url):
+        return []
+
     parsed   = urlparse(base_url)
     full_url = f"{parsed.scheme}://{parsed.netloc}{_USER_PATH}"
 

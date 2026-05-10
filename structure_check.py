@@ -18,6 +18,10 @@ Prováděné kontroly:
   11. Chybějící <meta name="viewport">
   12. <meta name="robots" content="noindex"> mimo dev domény
   13. URL ukazující na staging/dev domény (canonical, og:image, src, href...)
+
+Pro lokální / privátní hosty (localhost, 127.0.0.1, *.local…) se přeskočí
+kontroly které pro lokální vývoj nedávají smysl: HTTP odkazy, noindex,
+staging URL detekce.
 """
 import copy
 import re
@@ -29,6 +33,7 @@ from bs4 import BeautifulSoup
 from config import (META_TITLE_MIN, META_TITLE_MAX, META_DESC_MIN, META_DESC_MAX,
                     SKIP_NOINDEX_PATTERNS, STAGING_DOMAIN_PATTERNS)
 from issues import Issue, IssueType
+from ui import is_local_url
 
 _EMPTY_TAGS = ["p", "div", "span", "section", "article",
                "li", "td", "th", "h1", "h2", "h3", "h4", "h5", "h6"]
@@ -61,7 +66,7 @@ _FORBIDDEN_WORDS: list[str] = [
 # Parser preference — lxml je 3-5× rychlejší než html.parser
 # Fallback na html.parser pokud lxml není nainstalován
 try:
-    import lxml  # noqa: F401
+    import lxml  # type: ignore  # noqa: F401
     _PARSER = "lxml"
 except ImportError:
     _PARSER = "html.parser"
@@ -91,12 +96,14 @@ def _has_safe_rel(tag) -> bool:
 
 def _is_dev_noindex_domain(url: str) -> bool:
     """
-    True pokud URL je z domény kde je <meta noindex> záměr (dev/staging).
+    True pokud URL je z domény kde je <meta noindex> záměr (dev/staging/lokální).
     Tyto domény mají noindex by design — nehlásíme to jako chybu.
-    Patří sem domény definované v SKIP_NOINDEX_PATTERNS.
+    Patří sem domény definované v SKIP_NOINDEX_PATTERNS + všechny lokální hosty.
     """
     if not url:
         return False
+    if is_local_url(url):
+        return True
     netloc = urlparse(url).netloc.lower()
     return any(p in netloc for p in SKIP_NOINDEX_PATTERNS)
 
@@ -144,10 +151,15 @@ def _extract_urls_from_srcset(srcset: str) -> list[str]:
 def check_structure(html: str, page_url: str = "") -> List[Issue]:
     """
     Vrátí seznam Issue objektů.
-    page_url slouží k rozlišení interních vs. externích odkazů.
+    page_url slouží k rozlišení interních vs. externích odkazů a k detekci
+    lokálního prostředí (kde se některé kontroly přeskočí).
     """
     issues: List[Issue] = []
     soup   = BeautifulSoup(html, _PARSER)
+
+    # Lokální prostředí = některé kontroly nedávají smysl (http odkazy očekávané,
+    # noindex je záměr, staging URL je nesmysl)
+    page_is_local = is_local_url(page_url)
 
     # 1. H1
     h1s = soup.find_all("h1")
@@ -224,16 +236,21 @@ def check_structure(html: str, page_url: str = "") -> List[Issue]:
         ))
 
     # 7. HTTP odkazy
-    http_links = list(dict.fromkeys(
-        a["href"].strip() for a in soup.find_all("a", href=True)
-        if a["href"].strip().startswith("http://")
-    ))
-    if http_links:
-        issues.append(Issue(
-            type=IssueType.HTTP_LINK,
-            items=http_links[:50],
-            count=len(http_links),
+    # Na lokálním webu jsou http:// odkazy očekávané (lokální dev běží na http) —
+    # kontrolu úplně přeskočíme. Na produkci: ignorujeme odkazy mířící
+    # na lokální host (např. http://localhost:3000) jako neškodné.
+    if not page_is_local:
+        http_links = list(dict.fromkeys(
+            a["href"].strip() for a in soup.find_all("a", href=True)
+            if a["href"].strip().startswith("http://")
+            and not is_local_url(a["href"].strip())
         ))
+        if http_links:
+            issues.append(Issue(
+                type=IssueType.HTTP_LINK,
+                items=http_links[:50],
+                count=len(http_links),
+            ))
 
     # 8. Externí odkazy bez target="_blank" rel="noopener"
     bad_ext: list[str] = []
@@ -290,7 +307,7 @@ def check_structure(html: str, page_url: str = "") -> List[Issue]:
 
     # 12. Noindex meta tag — kritická chyba (web nebude v Googlu)
     # Skip pro dev/staging domény (poskireal.cz, *.cz.dev.poski.com)
-    # kde je noindex záměrný.
+    # a všechny lokální hosty kde je noindex záměrný.
     # Detekuje:
     #   <meta name="robots" content="noindex">
     #   <meta name="robots" content="noindex, nofollow">
@@ -314,7 +331,8 @@ def check_structure(html: str, page_url: str = "") -> List[Issue]:
     # 13. Staging/dev URL v HTML — leftover ze stagingu po nasazení na produkci.
     # Příklady: canonical pointující na staging, og:image z dev serveru,
     # odkaz vedoucí na dev verzi webu, lazy obrázek z dev URL.
-    # Skip pokud je sama auditovaná stránka na dev doméně (tam je dev URL záměr).
+    # Skip pokud je sama auditovaná stránka na dev/lokální doméně
+    # (tam je dev URL záměr).
     if not _is_dev_noindex_domain(page_url):
         staging_findings: list[str] = []      # ["[kontext] url", …]
         seen_findings:    set[str]  = set()   # deduplikace

@@ -4,7 +4,7 @@ Web Validator – hlavní spouštěcí soubor.
 Struktura:
   main.py            ← tento soubor (spouštěj tento)
   config.py          ← sdílené konstanty
-  ui.py              ← terminál UI (banner, prompt_url, helpers)
+  ui.py              ← terminál UI (banner, prompt_url, helpers, is_local_url)
   stats.py           ← výpočet statistik a skóre
   issues.py          ← Issue dataclass pro strukturální problémy
   crawler.py         ← crawling stránek
@@ -17,6 +17,7 @@ Struktura:
   vnu.jar            ← lokální W3C validátor
 """
 import argparse
+import ipaddress
 import re
 import sys
 import threading
@@ -42,7 +43,8 @@ from validator_w3c   import find_vnu_jar, start_server, stop_server
 from updater         import check_and_update, download_vnu_jar
 from stats           import compute_stats
 from ui              import (prompt_url, print_banner, is_valid_url,
-                             normalize_url_input, write, write_line)
+                             normalize_url_input, is_local_url,
+                             write, write_line)
 
 
 def fetch_html(session: requests.Session, url: str, timeout: int = FETCH_TIMEOUT):
@@ -140,6 +142,11 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
     total    = len(pages)
     computed = {}
 
+    # Lokální host = bez throttlingu. Dev server na vlastním stroji
+    # nepotřebujeme šetřit, audit běží řádově rychleji.
+    is_local = is_local_url(start_url)
+    fetch_pause = 0.0 if is_local else (FETCH_DELAY / FETCH_WORKERS)
+
     # Sdílená HTTP Session – keep-alive TCP spojení
     session = requests.Session()
     session.headers.update({
@@ -163,7 +170,8 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
             done += 1
             if done % FETCH_WORKERS == 0 or done == total:
                 write(f"\r  Staženo: {done}/{total}   ")
-            time.sleep(FETCH_DELAY / FETCH_WORKERS)
+            if fetch_pause > 0:
+                time.sleep(fetch_pause)
     print()
 
     # ── Krok 2: W3C + Struktura paralelně ────────────────────────────────────
@@ -283,9 +291,26 @@ def run_domain_checks(url: str) -> dict:
 
 
 def make_filename(url: str) -> str:
+    """
+    Sestaví jméno reportu z URL.
+      - Pro běžné domény vezme první část před tečkou (poski.com → poski)
+      - Pro IP adresy zachová celou (192.168.1.10 → 192_168_1_10)
+      - localhost zůstane localhost
+    """
     parsed = urlparse(url)
     host   = (parsed.hostname or parsed.netloc or "report").replace("www.", "")
-    name   = re.sub(r"[^a-zA-Z0-9_-]", "_", host.split(".")[0])
+
+    # IP adresa? Zachováme všechny oktety převedením teček na podtržítka.
+    try:
+        ipaddress.ip_address(host)
+        name = re.sub(r"[^a-zA-Z0-9_-]", "_", host)
+    except ValueError:
+        # Běžný hostname — vezmeme první část (před první tečkou)
+        name = re.sub(r"[^a-zA-Z0-9_-]", "_", host.split(".")[0])
+
+    # Fallback pro prázdný název (např. když host obsahoval jen speciální znaky)
+    if not name:
+        name = "report"
     return f"{name}_validator.xlsx"
 
 
@@ -354,6 +379,13 @@ def main():
     # (dřív bylo na začátku main() – pak se do časovače započítávalo
     #  i čekání na zadání URL a kontrola/stažení vnu.jar)
     _start_time = time.time()
+
+    # ── Info o lokálním auditu ──────────────────────────────────────────────
+    if is_local_url(url):
+        info("  [LOCAL]"); print(" Auditujeme lokální / privátní host – některé kontroly")
+        gray("          (robots.txt, noindex, staging URL, /uzivatel/) budou přeskočeny."); print()
+        gray("          Pauzy mezi requesty jsou vypnuté – audit poběží naplno."); print()
+        print()
 
     # ── Start vnu.jar server (pokud možno) ───────────────────────────────────
     if jar and not args.no_server:
@@ -437,7 +469,7 @@ def main():
     user_found     = [p for p in user_pages if p.get("exists")]
 
     if robots_skipped:
-        gray("  robots.txt check přeskočen (interní/dev doména)"); print()
+        gray("  robots.txt check přeskočen (interní/dev/lokální host)"); print()
     elif robots_issues:
         for issue in robots_issues:
             if issue.startswith(ROBOTS_CRITICAL_PREFIX):
@@ -449,7 +481,9 @@ def main():
     else:
         ok("  [✓]"); print(" robots.txt neblokuje JS/CSS")
 
-    if user_found:
+    if is_local_url(url) and not user_pages:
+        gray("  /uzivatel/ check přeskočen (lokální host)"); print()
+    elif user_found:
         warn("  [!] Nalezeny uživatelské stránky: ")
         print(", ".join(p["path"] for p in user_found))
     else:

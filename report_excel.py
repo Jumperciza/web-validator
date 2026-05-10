@@ -10,6 +10,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from issues import Issue, IssueType
 from robots_check import CRITICAL_PREFIX as ROBOTS_CRITICAL_PREFIX
 from stats  import compute_stats
+from ui     import is_local_url
 
 # ── Paleta ───────────────────────────────────────────────────────────────────
 G_BG="C6EFCE"; G_FT="1E6823"
@@ -78,10 +79,18 @@ def _spacer(ws, row, height=10):
     return row + 1
 
 def _as_https(url: str) -> str:
-    """Normalizuje URL na https:// (přepíše http:// → https://)."""
-    if isinstance(url, str) and url.startswith("http://"):
-        return "https://" + url[7:]
-    return url
+    """
+    Normalizuje URL na https:// (přepíše http:// → https://).
+    Lokální URL (localhost, IP, *.local…) se nemění — tam je http:// správné
+    a https varianta typicky neexistuje.
+    """
+    if not isinstance(url, str):
+        return url
+    if not url.startswith("http://"):
+        return url
+    if is_local_url(url):
+        return url
+    return "https://" + url[7:]
 
 def _w3c_link(url: str) -> str:
     return "https://validator.w3.org/nu/?doc=" + quote(_as_https(url), safe="")
@@ -153,7 +162,8 @@ def _write_summary(ws, row: int, score: int, stats, http_converted: bool = False
         vc.fill = _fill(bg); vc.alignment = _al("center"); vc.border = _brd()
         ws.row_dimensions[row].height = 22; row += 1
 
-    # Upozornění na http → https převod (zobrazí se jen když k tomu skutečně došlo)
+    # Upozornění na http → https převod (zobrazí se jen když k tomu skutečně došlo
+    # a převod se týkal veřejných URL — pro lokální host je http:// správné).
     if http_converted:
         ws.merge_cells(f"A{row}:G{row}")
         cell = ws.cell(row=row, column=1,
@@ -207,7 +217,56 @@ def _write_homepage_meta(ws, row: int, results: list) -> int:
     return row
 
 
-def _write_w3c_section(ws, row: int, results: list) -> int:
+def _format_w3c_messages(warnings: list, errors: list, max_items: int = 30) -> str:
+    """
+    Sestaví textový výpis W3C zpráv pro Excel buňku.
+
+    Vstup: list dictů ve formátu {"message": str, "line": int|None}
+           (formát použitý ve validator_w3c._classify).
+    Výstup: víceřádkový text s předponou typu a čísla řádku, např.:
+        [CHYBA @ 23] Element "img" missing required attribute "alt".
+        [VAROVÁNÍ @ 41] Section lacks heading.
+
+    Chyby jsou nahoře (závažnější), pak varování. Při velkém počtu zpráv
+    se zobrazí max_items a zbytek se shrne řádkem '… a další N'.
+    """
+    lines: list[str] = []
+
+    def _format_one(prefix: str, item: dict) -> str:
+        # `item` je dict {"message": "...", "line": int|None}
+        # Defenzivně: kdyby přišel string (starší formát), zachovej ho.
+        if isinstance(item, str):
+            return f"[{prefix}] {item}"
+        msg = (item.get("message") or "").strip()
+        ln  = item.get("line")
+        loc = f" @ ř.{ln}" if ln else ""
+        return f"[{prefix}{loc}] {msg}"
+
+    for e in errors:
+        lines.append(_format_one("CHYBA", e))
+    for w in warnings:
+        lines.append(_format_one("VAROVÁNÍ", w))
+
+    if len(lines) > max_items:
+        rest = len(lines) - max_items
+        lines = lines[:max_items] + [f"… a dalších {rest} zpráv (oříznuto)"]
+
+    return "\n".join(lines) if lines else ""
+
+
+def _write_w3c_section(ws, row: int, results: list, is_local_audit: bool = False) -> int:
+    """
+    Souhrn W3C validace.
+
+    Pro VEŘEJNÉ weby zobrazuje pro každou problematickou stránku odkaz
+    na https://validator.w3.org/nu/?doc=URL — uživatel klikne a uvidí detail.
+
+    Pro LOKÁLNÍ audit (localhost, 127.0.0.1, *.local…) tento odkaz nefunguje,
+    protože W3C server lokální URL nedohledá. Místo odkazu zobrazíme:
+      - přímou URL stránky (klikatelnou — uživatel si ji otevře v prohlížeči)
+      - sloupec navíc 'Výpis chyby z w3c' s textem všech chyb a varování
+        získaných z lokálního vnu.jar
+    """
     row = _spacer(ws, row)
     _title_row(ws, row, "W3C VALIDACE – STRÁNKY S PROBLÉMY", SUB); row += 1
 
@@ -220,22 +279,72 @@ def _write_w3c_section(ws, row: int, results: list) -> int:
         ws.row_dimensions[row].height = 20
         return row + 1
 
-    _hdr_row(ws, [("W3C Validator URL", 80), ("Status", 13),
-                  ("Varování", 9), ("Chyby", 8)], row=row, bg=SUB2)
+    # ── Hlavička tabulky ──────────────────────────────────────────────────────
+    # Layout sdílíme s ostatními sekcemi, šířky sloupců jsou globální:
+    # A=80, B=12, C=8, D=8, E=30, F=14, G=40
+    # Pro veřejný audit:  [W3C URL | Status | Varování | Chyby]   (E:G prázdné)
+    # Pro lokální audit:  [Stránka | Status | Varování | Chyby | Výpis chyby z w3c]
+    #                                                            └── E:G merged
+    if is_local_audit:
+        # Hlavička s 5 logickými sloupci (poslední je merged E:G)
+        for ci, label in enumerate(
+            ["Stránka", "Status", "Varování", "Chyby", "Výpis chyby z w3c"], 1
+        ):
+            target_col = ci if ci <= 4 else 5
+            c = ws.cell(row=row, column=target_col, value=label)
+            c.font = _hf(10); c.fill = _fill(SUB2)
+            c.alignment = _al("center"); c.border = _brd()
+        # E:G merged kvůli šířce výpisu
+        ws.merge_cells(f"E{row}:G{row}")
+        for col in range(6, 8):
+            ws.cell(row=row, column=col).fill = _fill(SUB2)
+            ws.cell(row=row, column=col).border = _brd()
+        ws.row_dimensions[row].height = 22
+    else:
+        _hdr_row(ws, [("W3C Validator URL", 80), ("Status", 13),
+                      ("Varování", 9), ("Chyby", 8)], row=row, bg=SUB2)
     row += 1
+
     for r in w3c_issues:
         cat = r["w3c_category"]
         w_txt = "VAROVÁNÍ" if cat == "warning" else "CHYBA" if cat == "error" else "VAR+CHYBA"
         w_bg  = O_BG if cat == "warning" else R_BG
         w_ft  = O_FT if cat == "warning" else R_FT
-        vurl  = _w3c_link(r["url"])
-        _dc(ws, row, 1, vurl, link=vurl)
+
+        if is_local_audit:
+            # Přímý odkaz na lokální stránku — uživatel si ji otevře v prohlížeči
+            page_url = r["url"]
+            _dc(ws, row, 1, page_url, link=page_url)
+        else:
+            # Veřejný web — odkaz na W3C Validator
+            vurl = _w3c_link(r["url"])
+            _dc(ws, row, 1, vurl, link=vurl)
+
         _badge(ws, row, 2, w_txt, w_bg, w_ft)
         _dc(ws, row, 3, len(r["w3c_warnings"]) or "",
             bg=O_BG if r["w3c_warnings"] else None, align="center")
         _dc(ws, row, 4, len(r["w3c_errors"]) or "",
             bg=R_BG if r["w3c_errors"] else None, align="center")
-        ws.row_dimensions[row].height = 18; row += 1
+
+        if is_local_audit:
+            # Sloupec navíc — výpis konkrétních chyb a varování z vnu.jar.
+            # E:G merged kvůli prostoru (cca 84 znaků šířky).
+            messages_text = _format_w3c_messages(
+                r.get("w3c_warnings") or [],
+                r.get("w3c_errors") or [],
+            )
+            ws.merge_cells(f"E{row}:G{row}")
+            _dc(ws, row, 5, messages_text or "(bez detailů)", align="left", sz=9)
+            for col in range(6, 8):
+                ws.cell(row=row, column=col).border = _brd()
+
+            # Výška řádku úměrná počtu zpráv (mezi 24 a 200)
+            n_lines = len(messages_text.splitlines()) if messages_text else 1
+            ws.row_dimensions[row].height = min(200, max(24, 14 * n_lines + 4))
+        else:
+            ws.row_dimensions[row].height = 18
+
+        row += 1
 
     return row
 
@@ -325,7 +434,7 @@ def _write_robots_section(ws, row: int, robots_issues: list, robots_skipped: boo
     if robots_skipped:
         ws.merge_cells(f"A{row}:G{row}")
         ws.cell(row=row, column=1,
-                value="ℹ Kontrola přeskočena – interní / dev prostředí")
+                value="ℹ Kontrola přeskočena – interní / dev / lokální prostředí")
         ws.cell(row=row, column=1).font = _bf(color=GR_FT)
         ws.cell(row=row, column=1).fill = _fill(GR_BG)
         ws.cell(row=row, column=1).border = _brd()
@@ -366,14 +475,19 @@ def _write_robots_section(ws, row: int, robots_issues: list, robots_skipped: boo
     return row
 
 
-def _write_user_pages(ws, row: int, user_pages: list) -> int:
+def _write_user_pages(ws, row: int, user_pages: list, is_local_audit: bool = False) -> int:
     row = _spacer(ws, row)
     _title_row(ws, row, "UŽIVATELSKÁ SEKCE – DETEKCE", SUB); row += 1
 
     if not user_pages:
         ws.merge_cells(f"A{row}:G{row}")
-        ws.cell(row=row, column=1, value="Kontrola neproběhla nebo nedostupná")
+        if is_local_audit:
+            msg = "ℹ Kontrola přeskočena – lokální / privátní host"
+        else:
+            msg = "Kontrola neproběhla nebo nedostupná"
+        ws.cell(row=row, column=1, value=msg)
         ws.cell(row=row, column=1).font = _bf(color=GR_FT)
+        ws.cell(row=row, column=1).fill = _fill(GR_BG) if is_local_audit else PatternFill()
         ws.row_dimensions[row].height = 18
         return row + 1
 
@@ -423,11 +537,18 @@ def write_report(results: list, output_path: Path, start_url: str,
     robots_skipped = domain_info.get("robots_skipped", False)
     user_pages     = domain_info.get("user_pages", [])
 
-    # Detekce jestli se nějaká URL převedla z http na https
+    is_local_audit = is_local_url(start_url)
+
+    # Detekce jestli se nějaká URL převedla z http na https.
+    # Pro lokální URL (localhost…) http:// nepřevádíme — http_converted by
+    # pak ukazoval falešné upozornění o konverzi která se ve skutečnosti nestala.
+    def _is_converted_http(u: str) -> bool:
+        return isinstance(u, str) and u.startswith("http://") and not is_local_url(u)
+
     http_converted = (
-        any(r.get("url", "").startswith("http://") for r in results)
-        or start_url.startswith("http://")
-        or any(p.get("url", "").startswith("http://") for p in user_pages)
+        any(_is_converted_http(r.get("url", "")) for r in results)
+        or _is_converted_http(start_url)
+        or any(_is_converted_http(p.get("url", "")) for p in user_pages)
     )
 
     wb = Workbook()
@@ -441,11 +562,11 @@ def write_report(results: list, output_path: Path, start_url: str,
     row = _write_header(ws, start_url, source_label)
     row = _write_summary(ws, row, score, stats, http_converted=http_converted)
     row = _write_homepage_meta(ws, row, results)
-    row = _write_w3c_section(ws, row, results)
+    row = _write_w3c_section(ws, row, results, is_local_audit=is_local_audit)
     row = _write_structure_section(ws, row, results)
     row = _write_failed_pages(ws, row, results)
     row = _write_robots_section(ws, row, robots_issues, robots_skipped)
-    row = _write_user_pages(ws, row, user_pages)
+    row = _write_user_pages(ws, row, user_pages, is_local_audit=is_local_audit)
 
     ws.freeze_panes = "A4"
     wb.save(output_path)
