@@ -3,6 +3,10 @@ Crawler – prochází web a vrací seznam HTML stránek na stejné doméně.
 
 Rychlost: paralelní stahování (ThreadPoolExecutor) s omezeným počtem
           současných požadavků – rychlejší ale pořád šetrný k webu.
+
+Pro lokální host (localhost, 127.0.0.1, *.local…) se vypnou všechny pauzy
+mezi dávkami i `MIN_CRAWL_DELAY` floor. Lokální dev server stejně neexistuje
+důvod ho šetřit a uživatelé chtějí audit co nejrychleji.
 """
 import re
 import sys
@@ -19,6 +23,7 @@ from bs4 import BeautifulSoup
 from colors import ok, warn, err, gray
 from config import (USER_AGENT, ACCEPT_LANGUAGE, CRAWL_TIMEOUT,
                     CRAWL_WORKERS, MIN_CRAWL_DELAY)
+from ui import is_local_url
 
 # ── Konfigurace ──────────────────────────────────────────────────────────────
 WORKERS   = CRAWL_WORKERS
@@ -76,6 +81,10 @@ def crawl_site(start_url: str, max_pages: int = 500,
     Crawluje web paralelně.
     delay = minimální pauza mezi dávkami (přepíše MIN_DELAY pokud je vyšší).
 
+    Pro lokální host (localhost, 127.0.0.1, *.local…) se delay nastaví na 0
+    a `MIN_CRAWL_DELAY` floor i `crawl-delay` z robots.txt se ignorují —
+    není koho šetřit, dev server má průchodnost vysokou.
+
     seed_urls = volitelný seznam URL které jsou už známé (např. z sitemap).
     Crawler tyto URL projde aby z nich vytáhl odkazy a objevil další stránky,
     ale nepřidá je do návratové hodnoty (volající kód je už má).
@@ -85,6 +94,8 @@ def crawl_site(start_url: str, max_pages: int = 500,
     if not parsed.scheme:
         start_url = "https://" + start_url
         parsed    = urlparse(start_url)
+
+    is_local = is_local_url(start_url)
 
     # Zjisti finální URL po přesměrování
     try:
@@ -101,19 +112,25 @@ def crawl_site(start_url: str, max_pages: int = 500,
         "Accept-Language": ACCEPT_LANGUAGE,
     })
 
-    # Robots.txt
-    rp = RobotFileParser()
-    try:
-        rp.set_url(f"{parsed.scheme}://{base_netloc}/robots.txt")
-        rp.read()
-        # Respektuj Crawl-delay z robots.txt pokud je nastavený
-        rp_delay = rp.crawl_delay(UA) or 0
-        effective_delay = max(delay, rp_delay, MIN_DELAY)
-    except Exception:
-        effective_delay = max(delay, MIN_DELAY)
+    # Robots.txt + crawl-delay
+    if is_local:
+        # Lokální host — robots.txt typicky neexistuje a i kdyby ho někdo měl,
+        # crawl-delay nás na vlastním stroji nezajímá.
+        rp = None
+        effective_delay = 0.0
+    else:
+        rp = RobotFileParser()
+        try:
+            rp.set_url(f"{parsed.scheme}://{base_netloc}/robots.txt")
+            rp.read()
+            # Respektuj Crawl-delay z robots.txt pokud je nastavený
+            rp_delay = rp.crawl_delay(UA) or 0
+            effective_delay = max(delay, rp_delay, MIN_DELAY)
+        except Exception:
+            effective_delay = max(delay, MIN_DELAY)
 
-    if effective_delay != delay:
-        gray(f"  (robots.txt nastavuje crawl-delay: {effective_delay}s)"); print()
+        if effective_delay != delay:
+            gray(f"  (robots.txt nastavuje crawl-delay: {effective_delay}s)"); print()
 
     # Připrav seed_set — URL z parametru seed_urls, které jsou už nalezené
     # jinou cestou (typicky sitemap). Tyto URL crawler stáhne a vytáhne z nich
@@ -196,11 +213,13 @@ def crawl_site(start_url: str, max_pages: int = 500,
 
             if _ignore(url) or not _same_domain(base_netloc, url):
                 continue
-            try:
-                if not rp.can_fetch(UA, url):
-                    continue
-            except Exception:
-                pass
+            # robots.txt check — jen pro veřejné weby; lokální host vynecháváme
+            if rp is not None:
+                try:
+                    if not rp.can_fetch(UA, url):
+                        continue
+                except Exception:
+                    pass
 
             batch.append(url)
 
@@ -217,7 +236,9 @@ def crawl_site(start_url: str, max_pages: int = 500,
                 if key not in seen:
                     queue.append(lnk)
 
-        # Krátká pauza mezi dávkami – šetrné k serveru
-        time.sleep(effective_delay)
+        # Krátká pauza mezi dávkami – šetrné k serveru.
+        # Pro lokální host effective_delay == 0, takže usínání úplně přeskakujeme.
+        if effective_delay > 0:
+            time.sleep(effective_delay)
 
     return found
