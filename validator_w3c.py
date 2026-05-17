@@ -31,6 +31,9 @@ from config import W3C_TIMEOUT
 # Globální cesta k vnu.jar – nastaví se při startu
 vnu_jar: str = ""
 
+# Minimální požadovaná major verze Javy pro vnu.jar
+MIN_JAVA_MAJOR = 11
+
 # ── Server mód state ─────────────────────────────────────────────────────────
 _server_proc: subprocess.Popen | None = None
 _server_port: int                     = 0
@@ -69,6 +72,59 @@ def get_local_version(jar_path: str) -> str:
         return "java_missing"
     except Exception:
         return "neznama"
+
+
+def check_java_version() -> tuple[str, str]:
+    """
+    Zjistí, zda je Java nainstalovaná a má dostatečnou verzi (11+ kvůli vnu.jar).
+
+    Funkce je tichá – nikdy nic netiskne. Pouze vrátí dvojici (status, verze)
+    a volající si rozhodne, jestli o tom uživatele informovat.
+
+    Návratové hodnoty:
+      ("ok",      "<verze>")  – Java je k dispozici a má aspoň verzi 11
+      ("missing", "")         – `java` není v PATH (není nainstalovaná)
+      ("too_old", "<verze>")  – Java je nainstalovaná, ale starší než 11
+      ("unknown", "")         – Spustila se, ale verzi nešlo rozpoznat
+                                (raději mlčíme, ať uživatele zbytečně nestrašíme)
+
+    Parsuje běžné formáty výstupu `java -version` (Java píše na stderr):
+      openjdk version "21.0.10" ...   → major = 21
+      openjdk version "17" ...        → major = 17
+      java version "1.8.0_281"        → major = 8  (legacy formát 1.X = X)
+    """
+    try:
+        r = subprocess.run(
+            ["java", "-version"],
+            capture_output=True, timeout=10,
+        )
+    except FileNotFoundError:
+        return ("missing", "")
+    except Exception:
+        return ("unknown", "")
+
+    # Java vypisuje -version na stderr; stdout držíme jako pojistku.
+    out = (r.stderr + r.stdout).decode("utf-8", errors="replace").strip()
+    if not out:
+        return ("unknown", "")
+
+    m = re.search(r'version\s+"([^"]+)"', out)
+    if not m:
+        return ("unknown", "")
+
+    version_str = m.group(1)
+    parts = version_str.split(".")
+    try:
+        major = int(parts[0])
+        # Legacy formát před Javou 9: "1.8.0_281" znamená Java 8
+        if major == 1 and len(parts) >= 2:
+            major = int(parts[1])
+    except (ValueError, IndexError):
+        return ("unknown", version_str)
+
+    if major < MIN_JAVA_MAJOR:
+        return ("too_old", version_str)
+    return ("ok", version_str)
 
 
 # ── Server mód ───────────────────────────────────────────────────────────────

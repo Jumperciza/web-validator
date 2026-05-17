@@ -39,7 +39,8 @@ from robots_check    import (check_robots_js_css, check_user_pages,
 import validator_w3c as w3c_mod
 from structure_check import check_structure, check_homepage_meta
 from report_excel    import write_report
-from validator_w3c   import find_vnu_jar, start_server, stop_server
+from validator_w3c   import (find_vnu_jar, start_server, stop_server,
+                             check_java_version)
 from updater         import check_and_update, download_vnu_jar
 from stats           import compute_stats
 from ui              import (prompt_url, print_banner, is_valid_url,
@@ -88,6 +89,26 @@ def _score_color_fn(score: int):
     if score >= 80: return ok
     if score >= 60: return warn
     return err
+
+
+def _report_java_problem(status: str, version: str) -> None:
+    """
+    Vypíše varování pokud Java chybí nebo je zastaralá.
+    Tichý při statusu 'ok' nebo 'unknown' – nic se neděje, validace pojede dál.
+    Při 'missing'/'too_old' uživatele přátelsky nasměrujeme na adoptium.net.
+    """
+    if status == "missing":
+        err("  [!] Java není nainstalovaná!"); print()
+        gray("      W3C validace přes vnu.jar vyžaduje Javu 11 nebo novější."); print()
+        gray("      Stáhnout zdarma: "); blue("https://adoptium.net"); print()
+        gray("      Bez Javy nebude W3C validace fungovat."); print()
+        print()
+    elif status == "too_old":
+        err(f"  [!] Java je příliš stará (nalezena verze {version})!"); print()
+        gray("      W3C validace přes vnu.jar vyžaduje Javu 11 nebo novější."); print()
+        gray("      Aktualizovat: "); blue("https://adoptium.net"); print()
+        gray("      Se starou Javou se vnu.jar nespustí a W3C validace bude přeskočena."); print()
+        print()
 
 
 def _print_result(idx: int, total: int, url: str, w3c: dict,
@@ -330,12 +351,24 @@ def main():
     # ── Banner ───────────────────────────────────────────────────────────────
     print_banner()
 
+    # ── Java check ───────────────────────────────────────────────────────────
+    # Tichý při OK / unknown — varuje jen pokud Java chybí nebo je < 11.
+    # Vyhodnocujeme jednou na startu; podle výsledku pak rozhodneme,
+    # jestli má smysl provádět update check vnu.jar (ten Javu potřebuje).
+    java_status, java_ver = check_java_version()
+    _report_java_problem(java_status, java_ver)
+    java_ok = java_status in ("ok", "unknown")
+
     # ── Detekce vnu.jar ──────────────────────────────────────────────────────
     jar = find_vnu_jar()
     if jar:
         ok("  [LOCAL]"); print(f" Lokální validátor nalezen: {jar}")
-        if not args.no_update_check:
+        # Update check má smysl jen pokud Java funguje — jinak by updater.py
+        # vypsal skoro stejné varování o Javě znovu (duplicita).
+        if not args.no_update_check and java_ok:
             jar = check_and_update(jar, non_interactive=args.no_interactive)
+        elif not java_ok:
+            gray("  Kontrola verze vnu.jar přeskočena (Java nefunguje)."); print()
         w3c_mod.vnu_jar = jar
         ok("  [✓]"); print(f" W3C validátor připraven: {jar}")
     else:

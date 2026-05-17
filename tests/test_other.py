@@ -1,16 +1,18 @@
-"""Testy pro stats, ui, robots_check, sitemap parser."""
+"""Testy pro stats, ui, robots_check, sitemap parser a Java version check."""
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from stats        import compute_stats
-from ui           import is_valid_url, normalize_url_input
-from robots_check import (_parse_robots, _get_relevant_disallows,
-                          CRITICAL_PREFIX)
-from sitemap      import _parse_sitemap_xml
-from issues       import Issue, IssueType
+from stats         import compute_stats
+from ui            import is_valid_url, normalize_url_input
+from robots_check  import (_parse_robots, _get_relevant_disallows,
+                           CRITICAL_PREFIX)
+from sitemap       import _parse_sitemap_xml
+from issues        import Issue, IssueType
+from validator_w3c import check_java_version
 
 
 # ── Stats ────────────────────────────────────────────────────────────────────
@@ -32,7 +34,6 @@ class TestStats(unittest.TestCase):
 
     def test_all_bad(self):
         """Když má každá stránka mnoho kritických problémů, skóre je 0."""
-        # Penalizace: -25 -20 -15 -15 -15 -10 = -100 → clamp na 0
         critical_issues = [
             Issue(type=IssueType.NOINDEX),                                    # -25
             Issue(type=IssueType.FORBIDDEN_CONTENT, items=['"lorem ipsum"']), # -20
@@ -52,14 +53,13 @@ class TestStats(unittest.TestCase):
         self.assertEqual(s.w3c_err, 2)
 
     def test_half_bad(self):
-        """Jedna OK stránka + jedna na 0 = průměr 50."""
         critical_issues = [
-            Issue(type=IssueType.NOINDEX),                                    # -25
-            Issue(type=IssueType.FORBIDDEN_CONTENT, items=['"lorem ipsum"']), # -20
-            Issue(type=IssueType.MISSING_H1),                                 # -15
-            Issue(type=IssueType.MISSING_META_DESC),                          # -15
-            Issue(type=IssueType.MISSING_VIEWPORT),                           # -15
-            Issue(type=IssueType.MISSING_LANG),                               # -10
+            Issue(type=IssueType.NOINDEX),
+            Issue(type=IssueType.FORBIDDEN_CONTENT, items=['"lorem ipsum"']),
+            Issue(type=IssueType.MISSING_H1),
+            Issue(type=IssueType.MISSING_META_DESC),
+            Issue(type=IssueType.MISSING_VIEWPORT),
+            Issue(type=IssueType.MISSING_LANG),
         ]
         results = [
             {"w3c_category": "ok", "structure_issues": []},
@@ -79,7 +79,6 @@ class TestStats(unittest.TestCase):
         self.assertEqual(s.w3c_warn, 1)
 
     def test_validator_error_reduces_score(self):
-        """Nedostupná stránka je 'špatná'."""
         results = [
             {"w3c_category": "ok",              "structure_issues": []},
             {"w3c_category": "validator_error", "structure_issues": [],
@@ -94,23 +93,15 @@ class TestStats(unittest.TestCase):
 
 class TestUrlValidation(unittest.TestCase):
     def test_valid_urls(self):
-        for url in [
-            "https://example.cz/",
-            "http://example.com",
-            "https://www.google.com/path/to/page",
-            "https://sub.domain.co.uk/",
-            "https://example.cz/page?query=1",
-        ]:
+        for url in ["https://example.cz/", "http://example.com",
+                    "https://www.google.com/path/to/page",
+                    "https://sub.domain.co.uk/",
+                    "https://example.cz/page?query=1"]:
             self.assertTrue(is_valid_url(url), f"měla by být platná: {url}")
 
     def test_invalid_urls(self):
-        for url in [
-            "neni-to-url",
-            "example",
-            "https://",
-            "http://nodomain",
-            "ftp://example.cz/",
-        ]:
+        for url in ["neni-to-url", "example", "https://",
+                    "http://nodomain", "ftp://example.cz/"]:
             self.assertFalse(is_valid_url(url), f"měla by být neplatná: {url}")
 
     def test_normalize_adds_https(self):
@@ -129,30 +120,18 @@ class TestUrlValidation(unittest.TestCase):
 
 class TestRobotsParser(unittest.TestCase):
     def test_simple_disallow(self):
-        content = """
-        User-agent: *
-        Disallow: /admin/
-        """
+        content = "User-agent: *\nDisallow: /admin/\n"
         parsed = _parse_robots(content)
         self.assertIn("/admin/", parsed.get("*", []))
 
     def test_multiple_user_agents_one_block(self):
-        """Several User-agent over one rules block — všechny dostanou stejná pravidla."""
-        content = """
-        User-agent: Googlebot
-        User-agent: Bingbot
-        Disallow: /private/
-        """
+        content = "User-agent: Googlebot\nUser-agent: Bingbot\nDisallow: /private/\n"
         parsed = _parse_robots(content)
         self.assertIn("/private/", parsed.get("googlebot", []))
         self.assertIn("/private/", parsed.get("bingbot", []))
 
     def test_comments_ignored(self):
-        content = """
-        # Komentář
-        User-agent: *   # inline komentář
-        Disallow: /hidden/
-        """
+        content = "# Komentář\nUser-agent: *   # inline komentář\nDisallow: /hidden/\n"
         parsed = _parse_robots(content)
         self.assertIn("/hidden/", parsed.get("*", []))
 
@@ -160,7 +139,7 @@ class TestRobotsParser(unittest.TestCase):
         parsed = {
             "googlebot": ["/gb/"],
             "*":         ["/all/"],
-            "bingbot":   ["/bg/"],   # nesmí se dostat do výsledku
+            "bingbot":   ["/bg/"],
         }
         d = _get_relevant_disallows(parsed)
         self.assertIn("/gb/", d)
@@ -174,39 +153,25 @@ class TestDisallowAll(unittest.TestCase):
     """Detekce 'Disallow: /' která blokuje celý web pro Googlebota."""
 
     def test_disallow_root_for_star(self):
-        """Disallow: / pro * = celý web zakázán pro všechny boty."""
-        content = """
-        User-agent: *
-        Disallow: /
-        """
+        content = "User-agent: *\nDisallow: /\n"
         parsed = _parse_robots(content)
         disallows = _get_relevant_disallows(parsed)
         self.assertIn("/", disallows)
 
     def test_disallow_root_for_googlebot(self):
-        """Disallow: / specificky pro Googlebot."""
-        content = """
-        User-agent: Googlebot
-        Disallow: /
-        """
+        content = "User-agent: Googlebot\nDisallow: /\n"
         parsed = _parse_robots(content)
         disallows = _get_relevant_disallows(parsed)
         self.assertIn("/", disallows)
 
     def test_disallow_subpath_not_root(self):
-        """Disallow: /admin/ nesmí být zaměněno s Disallow: / – jen subdir."""
-        content = """
-        User-agent: *
-        Disallow: /admin/
-        """
+        content = "User-agent: *\nDisallow: /admin/\n"
         parsed = _parse_robots(content)
         disallows = _get_relevant_disallows(parsed)
-        # Subdir je v listu, ale samotné lomítko ne
         self.assertIn("/admin/", disallows)
         self.assertNotIn("/", disallows)
 
     def test_critical_prefix_constant(self):
-        """CRITICAL_PREFIX je definovaný a začíná hranatou závorkou."""
         self.assertTrue(CRITICAL_PREFIX.startswith("["))
         self.assertIn("KRITICK", CRITICAL_PREFIX)
 
@@ -236,10 +201,8 @@ class TestSitemapParser(unittest.TestCase):
         self.assertEqual(len(sitemaps), 2)
 
     def test_malformed_xml_fallback(self):
-        """Porušený XML nesmí vyhodit vyjímku."""
         xml = "<urlset><url><loc>https://example.cz/broken"
         pages, sitemaps = _parse_sitemap_xml(xml)
-        # Jen že neselže; obsah je whatever
         self.assertIsInstance(pages, list)
         self.assertIsInstance(sitemaps, list)
 
@@ -247,27 +210,171 @@ class TestSitemapParser(unittest.TestCase):
 # ── Hybrid sitemap → crawler ─────────────────────────────────────────────────
 
 class TestHybridCrawl(unittest.TestCase):
-    """
-    Strukturální testy pro hybrid režim (sitemap → crawler s málo URL).
-    Síťové testy nemají smysl bez mockování — testujeme aspoň že rozhraní
-    je správně a konstanty existují.
-    """
-
     def test_sitemap_min_pages_constant(self):
-        """Práh musí být v configu a být rozumné kladné číslo."""
         from config import SITEMAP_MIN_PAGES
         self.assertIsInstance(SITEMAP_MIN_PAGES, int)
         self.assertGreater(SITEMAP_MIN_PAGES, 0)
-        self.assertLess(SITEMAP_MIN_PAGES, 100)   # rozumný horní strop
+        self.assertLess(SITEMAP_MIN_PAGES, 100)
 
     def test_crawl_site_accepts_seed_urls(self):
-        """crawl_site musí umět přijmout seed_urls kwarg."""
         import inspect
         from crawler import crawl_site
         sig = inspect.signature(crawl_site)
         self.assertIn("seed_urls", sig.parameters)
-        # Default by měl být None (nebo aspoň falsy)
         self.assertFalse(sig.parameters["seed_urls"].default)
+
+
+# ── Java version check ──────────────────────────────────────────────────────
+
+class TestJavaVersionCheck(unittest.TestCase):
+    """
+    Testy pro check_java_version() — mockujeme subprocess.run, takže testy
+    běží i na stroji bez Javy a nezávisle na tom, jakou verzi má vývojář
+    nainstalovanou.
+
+    Kontrolujeme parsování všech tří formátů výstupu `java -version`:
+      - Moderní (Java 9+):     openjdk version "21.0.10"
+      - Krátký (jen major):    openjdk version "17"
+      - Legacy (Java 8 a níž): java version "1.8.0_281"  → major = 8
+    """
+
+    def _make_run_result(self, stderr: bytes = b"", stdout: bytes = b"") -> MagicMock:
+        """Pomocná: vyrobí mock objekt vracený subprocess.run."""
+        r = MagicMock()
+        r.stderr = stderr
+        r.stdout = stdout
+        return r
+
+    # ── Moderní formát (Java 9+) ─────────────────────────────────────────────
+
+    @patch("validator_w3c.subprocess.run")
+    def test_modern_format_java21(self, mock_run):
+        mock_run.return_value = self._make_run_result(
+            stderr=b'openjdk version "21.0.10" 2026-01-20\n'
+                   b'OpenJDK Runtime Environment (build 21.0.10+7)\n'
+        )
+        status, ver = check_java_version()
+        self.assertEqual(status, "ok")
+        self.assertEqual(ver, "21.0.10")
+
+    @patch("validator_w3c.subprocess.run")
+    def test_modern_format_java17(self, mock_run):
+        mock_run.return_value = self._make_run_result(
+            stderr=b'openjdk version "17.0.8" 2023-07-18\n'
+        )
+        status, ver = check_java_version()
+        self.assertEqual(status, "ok")
+        self.assertEqual(ver, "17.0.8")
+
+    @patch("validator_w3c.subprocess.run")
+    def test_short_version_format(self, mock_run):
+        """Java někdy vypíše jen major bez teček: openjdk version "17"."""
+        mock_run.return_value = self._make_run_result(
+            stderr=b'openjdk version "17" 2023-09-19\n'
+        )
+        status, ver = check_java_version()
+        self.assertEqual(status, "ok")
+        self.assertEqual(ver, "17")
+
+    # ── Hranice 11 (minimum pro vnu.jar) ─────────────────────────────────────
+
+    @patch("validator_w3c.subprocess.run")
+    def test_minimum_supported_java11(self, mock_run):
+        """Java 11 přesně na hraně musí projít jako OK."""
+        mock_run.return_value = self._make_run_result(
+            stderr=b'openjdk version "11.0.19" 2023-04-18 LTS\n'
+        )
+        status, ver = check_java_version()
+        self.assertEqual(status, "ok")
+        self.assertEqual(ver, "11.0.19")
+
+    @patch("validator_w3c.subprocess.run")
+    def test_just_below_threshold_java10(self, mock_run):
+        """Java 10 je o jednu pod prahem — too_old."""
+        mock_run.return_value = self._make_run_result(
+            stderr=b'openjdk version "10.0.2" 2018-07-17\n'
+        )
+        status, ver = check_java_version()
+        self.assertEqual(status, "too_old")
+        self.assertEqual(ver, "10.0.2")
+
+    @patch("validator_w3c.subprocess.run")
+    def test_java9_too_old(self, mock_run):
+        mock_run.return_value = self._make_run_result(
+            stderr=b'openjdk version "9.0.4"\n'
+        )
+        status, ver = check_java_version()
+        self.assertEqual(status, "too_old")
+        self.assertEqual(ver, "9.0.4")
+
+    # ── Legacy formát (Java 8 a níž: "1.X.Y") ────────────────────────────────
+
+    @patch("validator_w3c.subprocess.run")
+    def test_legacy_format_java8(self, mock_run):
+        """1.8.0_281 = Java 8 (legacy formát před Javou 9) → too_old."""
+        mock_run.return_value = self._make_run_result(
+            stderr=b'java version "1.8.0_281"\n'
+                   b'Java(TM) SE Runtime Environment\n'
+        )
+        status, ver = check_java_version()
+        self.assertEqual(status, "too_old")
+        self.assertEqual(ver, "1.8.0_281")
+
+    @patch("validator_w3c.subprocess.run")
+    def test_legacy_format_java7(self, mock_run):
+        mock_run.return_value = self._make_run_result(
+            stderr=b'java version "1.7.0_80"\n'
+        )
+        status, ver = check_java_version()
+        self.assertEqual(status, "too_old")
+
+    # ── Chybové scénáře ──────────────────────────────────────────────────────
+
+    @patch("validator_w3c.subprocess.run", side_effect=FileNotFoundError)
+    def test_java_not_installed(self, mock_run):
+        """`java` není v PATH → FileNotFoundError → status 'missing'."""
+        status, ver = check_java_version()
+        self.assertEqual(status, "missing")
+        self.assertEqual(ver, "")
+
+    @patch("validator_w3c.subprocess.run", side_effect=OSError("permission denied"))
+    def test_subprocess_generic_error(self, mock_run):
+        """Jakákoli jiná výjimka → 'unknown' (raději mlčet než matoucí hláška)."""
+        status, ver = check_java_version()
+        self.assertEqual(status, "unknown")
+        self.assertEqual(ver, "")
+
+    @patch("validator_w3c.subprocess.run")
+    def test_empty_output(self, mock_run):
+        """Prázdný stdout i stderr → 'unknown'."""
+        mock_run.return_value = self._make_run_result(stderr=b"", stdout=b"")
+        status, ver = check_java_version()
+        self.assertEqual(status, "unknown")
+        self.assertEqual(ver, "")
+
+    @patch("validator_w3c.subprocess.run")
+    def test_garbage_output(self, mock_run):
+        """Když java vypíše něco nečekaného (chybí 'version "X"'), je to unknown."""
+        mock_run.return_value = self._make_run_result(
+            stderr=b"completely unrelated garbage output without version string"
+        )
+        status, ver = check_java_version()
+        self.assertEqual(status, "unknown")
+        self.assertEqual(ver, "")
+
+    @patch("validator_w3c.subprocess.run")
+    def test_output_on_stdout_instead_of_stderr(self, mock_run):
+        """
+        Kdyby se Java v budoucnu rozhodla psát na stdout (nebo nějaký wrapper
+        to přesměroval), funkce to musí stejně rozpoznat.
+        """
+        mock_run.return_value = self._make_run_result(
+            stderr=b"",
+            stdout=b'openjdk version "21.0.1" 2023-10-17\n'
+        )
+        status, ver = check_java_version()
+        self.assertEqual(status, "ok")
+        self.assertEqual(ver, "21.0.1")
 
 
 if __name__ == "__main__":
