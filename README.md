@@ -10,7 +10,7 @@ Nástroj pro automatizovaný technický audit webu. Zadáš URL, program projde 
 Každá stránka prochází lokální validací přes `vnu.jar` (offline, žádná data se neodesílají). Výsledky jsou rozděleny na **OK**, **Varování** a **Chyby**.
 
 ### 2. Struktura HTML
-Na každé stránce se kontroluje 13 věcí:
+Na každé stránce se kontroluje 15 věcí (+ 1 napříč webem):
 
 | Co se kontroluje | Popis |
 |---|---|
@@ -27,8 +27,11 @@ Na každé stránce se kontroluje 13 věcí:
 | Meta viewport | Bez něj se stránka na mobilech zobrazuje špatně |
 | `noindex` meta tag | Detekuje `<meta name="robots" content="noindex">` na produkci |
 | Staging/dev URL v HTML | Detekuje canonical/og:image/odkazy ukazující na dev domény |
+| `<title>` | Musí existovat a nesmí být prázdný (na každé stránce, délka se hlídá jen na homepage) |
+| Canonical | `<link rel="canonical">` musí existovat, mířit sám na sebe a nebýt `http://` na https webu |
+| Duplicitní `<title>` *(napříč webem)* | Stejný titulek na více stránkách – v reportu jeden řádek na každý duplicitní titulek |
 
-> ⚠️ **Noindex check** je přeskočen pro dev/staging domény (`*.cz.dev.poski.com`, `*.poskireal.cz`), kde je `noindex` záměrný.
+> ⚠️ **Noindex check** je přeskočen pro dev/staging domény (`*.cz.dev.poski.com`, `*.poskireal.cz`), kde je `noindex` záměrný. Stejně tak **canonical check** – na dev/lokálním webu canonical běžně (a správně) míří na produkci.
 
 > ⚠️ **Staging URL check** prochází `<a>`, `<img>`, `<script>`, `<link>` (canonical, alternate), `<iframe>`, `<video>`, `<form action>`, Open Graph (`og:image`, `og:url`), Twitter Cards a další. Stejně jako noindex je přeskočen pro dev domény.
 
@@ -59,12 +62,17 @@ Skóre se počítá **váhově** — ne všechny problémy mají stejnou závaž
 | Stránka má `noindex` (mimo dev domény) | **−25** |
 | Testovací obsah v produkci (lorem ipsum, asdf…) | **−20** |
 | Chybí `<h1>` | **−15** |
+| Chybí / prázdný `<title>` | **−15** |
 | Chybí meta description | **−15** |
 | Prázdná meta description | **−15** |
 | Chybí meta viewport | **−15** |
 | Chybí `lang` atribut na `<html>` | **−10** |
+| Canonical míří na jinou URL (nebo je jich víc) | **−10** |
 | Duplicitní `<h1>` | **−8** |
+| Canonical používá `http://` na https stránce | **−8** |
 | Přeskočení úrovně nadpisů | **−5** |
+| Duplicitní `<title>` (každá z postižených stránek) | **−5** |
+| Chybí canonical | **−3** |
 
 ### Počítané problémy (penalizace škáluje s počtem, ale s cap)
 
@@ -125,6 +133,12 @@ python main.py https://example.cz/ --no-interactive
 
 # Bez vnu server módu (fallback na subprocess)
 python main.py https://example.cz/ --no-server
+
+# Vynechat blog a anglickou verzi, report neschovávat pod starý
+python main.py https://example.cz/ --exclude "/blog/*" --exclude "/en/*" --keep
+
+# CI / kontrola před nasazením: exit kód 1 když je skóre pod 80
+python main.py https://example.cz/ --no-interactive --fail-under 80 --output reporty/
 ```
 
 ### Parametry
@@ -134,9 +148,17 @@ python main.py https://example.cz/ --no-server
 | `url` | *(ptá se)* | URL webu k auditu |
 | `--max-pages` | `500` | Maximální počet stránek |
 | `--delay` | `1.0` | Pauza mezi dávkami crawleru (s) |
+| `--exclude VZOR` | — | Vynechá URL odpovídající glob vzoru (`/blog/*`, `*.pdf`, `https://ex.cz/en/*`). Lze opakovat nebo oddělit čárkou; platí pro sitemap i crawler |
+| `--output CESTA` | `excel reporty/<host>_validator.xlsx` | Soubor `.xlsx`, nebo adresář (v něm výchozí jméno) |
+| `--keep` | — | Nepřepisovat starý report – do jména se přidá časová značka |
+| `--fail-under N` | — | Exit kód 1, když je Web Quality Score < N (0–100) |
 | `--no-update-check` | — | Přeskočí kontrolu verze vnu.jar |
 | `--no-interactive` | — | Žádné interaktivní dotazy |
 | `--no-server` | — | Nepoužívat vnu.jar server mód |
+
+**Exit kódy:** `0` = hotovo (a skóre ≥ prahu, pokud je zadaný), `1` = skóre pod `--fail-under` nebo žádné stránky k auditu, `2` = chybné argumenty, `130` = Ctrl+C.
+
+> 💡 Výchozí report se při každém běhu **přepisuje** – je to snímek aktuálního stavu webu. Když je soubor otevřený v Excelu, uloží se vedle s časovou značkou. Historii verzí si vynutíš přes `--keep`.
 
 ---
 
@@ -168,9 +190,11 @@ Pokud server selže (port zablokovaný, problém se startem), automaticky se př
 ├── report_excel.py     ← Generování Excel reportu
 ├── updater.py          ← Aktualizace vnu.jar z GitHubu
 ├── colors.py           ← Barevný terminál
-├── tests/              ← Unit testy (85 testů)
+├── tests/              ← Unit testy (228 testů)
 │   ├── test_structure_check.py
-│   └── test_other.py
+│   ├── test_other.py
+│   ├── test_network_checks.py
+│   └── test_report_and_crawler.py
 ├── requirements.txt    ← Pinnuté závislosti
 └── vnu.jar             ← Lokální W3C validátor (stáhni samostatně)
 ```
@@ -183,7 +207,7 @@ Pokud server selže (port zablokovaný, problém se startem), automaticky se př
 python -m unittest discover tests/
 ```
 
-85 testů pokrývá všechny HTML kontroly (včetně noindex a staging URL detekce), URL validaci, statistiky, robots.txt parser (včetně detekce Disallow: /), sitemap parser a hybrid crawl logiku.
+228 testů pokrývá všechny HTML kontroly (včetně noindex, staging URL, title a canonical), CLI přepínače (`--exclude`, `--output`/`--keep`, `--fail-under` exit kódy), URL validaci, statistiky, robots.txt parser (včetně detekce Disallow: /), sitemap parser (včetně `.xml.gz`), crawler (filtry, deduplikace, robots.txt, hybrid režim), detekci `/uzivatel/` (soft 404, přesměrování), kódování stažených stránek, zamčený Excel soubor a obsah vygenerovaného Excel reportu.
 
 ---
 

@@ -15,9 +15,13 @@ robots.txt check:
 
 Uživatelská sekce:
   - Testuje jednu cestu: /uzivatel/
-  - HTTP 200 = existuje, jiný kód = neexistuje.
+  - HTTP 200 = existuje, ale jen pokud web nevrací 200 i pro náhodnou
+    neexistující cestu (catch-all / soft 404) a nepřesměroval nás jinam.
+  - HTTP 401/403 = existuje (chráněná sekce).
+  - Síťová chyba = status 0, "nedostupné" (ne "neexistuje").
 """
 import re
+import uuid
 from urllib.parse import urlparse
 
 import requests
@@ -198,7 +202,9 @@ def check_user_pages(base_url: str) -> list[dict]:
     Otestuje zda existuje /uzivatel/ sekce.
 
     Vrátí seznam s jedním dict (list pro kompatibilitu s report_excel.py):
-      [{path, url, status_code, exists}]
+      [{path, url, status_code, exists, note}]
+    `note` = lidsky čitelné zdůvodnění (soft 404, přesměrování, chyba spojení…),
+    prázdný string když není co dodat.
 
     Pro lokální hosty (localhost, 127.0.0.1, *.local…) vrací prázdný list —
     detekce uživatelské sekce na lokálním vývojovém serveru nemá smysl.
@@ -207,24 +213,78 @@ def check_user_pages(base_url: str) -> list[dict]:
         return []
 
     parsed   = urlparse(base_url)
-    full_url = f"{parsed.scheme}://{parsed.netloc}{_USER_PATH}"
+    root     = f"{parsed.scheme}://{parsed.netloc}"
+    full_url = root + _USER_PATH
+    headers  = {"User-Agent": UA, "Accept-Language": ACCEPT_LANGUAGE}
 
     try:
-        resp        = requests.get(
-            full_url,
-            timeout=TIMEOUT,
-            allow_redirects=True,
-            headers={"User-Agent": UA, "Accept-Language": ACCEPT_LANGUAGE},
-        )
+        resp        = requests.get(full_url, timeout=TIMEOUT,
+                                   allow_redirects=True, headers=headers)
         status_code = resp.status_code
-        exists      = (status_code == 200)
-    except Exception:
-        status_code = 0
-        exists      = False
+    except Exception as e:
+        # Síťová chyba ≠ "neexistuje" – to nevíme. status 0 + note, aby
+        # report ukázal "nedostupné" místo zeleného "Neexistuje".
+        return [{
+            "path": _USER_PATH, "url": full_url, "status_code": 0,
+            "exists": False, "note": f"chyba spojení: {e.__class__.__name__}",
+        }]
+
+    exists = False
+    note   = ""
+    if status_code == 200:
+        final_path = (urlparse(resp.url).path or "/").lower()
+        if final_path.startswith(_USER_PATH.rstrip("/")):
+            in_section = True
+        elif any(k in final_path for k in ("prihlas", "login", "uzivatel")):
+            # Přesměrování na přihlášení = sekce existuje, jen chce login
+            in_section = True
+            note = f"přesměrováno na přihlášení: {resp.url}"
+        else:
+            in_section = False
+            # Přesměrováno pryč (typicky na homepage) – sekce reálně není.
+            note = f"přesměrováno na {resp.url}"
+        if in_section:
+            # HTTP 200 samo o sobě nestačí: "catch-all" weby vrací 200 s
+            # homepage/soft-404 pro libovolnou cestu. Sondou na nesmyslnou
+            # cestu zjistíme, jestli je 200 vůbec vypovídající.
+            exists, confirm_note = _confirm_exists(root, resp, headers)
+            note = confirm_note or note
+    elif status_code in (401, 403):
+        # Chráněná sekce – existuje, jen do ní nesmíme.
+        exists = True
+        note   = f"HTTP {status_code} – chráněný přístup"
 
     return [{
         "path":        _USER_PATH,
         "url":         full_url,
         "status_code": status_code,
         "exists":      exists,
+        "note":        note,
     }]
+
+
+def _confirm_exists(root: str, resp, headers: dict) -> tuple[bool, str]:
+    """
+    Ověří, že HTTP 200 pro /uzivatel/ není jen catch-all odpověď webu.
+    Stáhne náhodnou neexistující cestu; pokud i ta vrátí 200 s (téměř)
+    stejným obsahem, je /uzivatel/ soft-404 → neexistuje.
+    Když se sonda nepovede (síť), věříme původní 200.
+    """
+    probe_url = f"{root}/wv-probe-{uuid.uuid4().hex[:12]}/"
+    try:
+        probe = requests.get(probe_url, timeout=TIMEOUT,
+                             allow_redirects=True, headers=headers)
+    except Exception:
+        return True, ""
+
+    if probe.status_code != 200:
+        return True, ""
+
+    # Web vrací 200 i pro nesmysl → porovnáme obsah
+    a, b = resp.content, probe.content
+    if a == b:
+        return False, "soft 404 – web vrací 200 pro libovolnou cestu"
+    ratio = len(a) / len(b) if b else 0
+    if 0.9 <= ratio <= 1.1:
+        return False, "soft 404 – web vrací 200 pro libovolnou cestu"
+    return True, "web vrací 200 i pro neexistující cesty – ověř ručně"

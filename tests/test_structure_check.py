@@ -10,7 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from structure_check import check_structure, check_homepage_meta
+from structure_check import (check_structure, check_homepage_meta,
+                             extract_title, mark_duplicate_titles)
 from issues import IssueType
 
 
@@ -148,6 +149,18 @@ class TestHttpLinks(unittest.TestCase):
         issues = check_structure(html)
         self.assertFalse(_has_issue(issues, IssueType.HTTP_LINK))
 
+    def test_uppercase_scheme_detected(self):
+        """Schéma je case-insensitive – HTTP:// je stejně nezabezpečené."""
+        html = '<h1>A</h1><a href="HTTP://insecure.com">link</a>'
+        issues = check_structure(html)
+        self.assertTrue(_has_issue(issues, IssueType.HTTP_LINK))
+
+    def test_protocol_relative_not_http_link(self):
+        """//host se rozvine na schéma stránky (https) – není to http odkaz."""
+        html = '<h1>A</h1><a href="//cdn.example.com/x">link</a>'
+        issues = check_structure(html, page_url="https://myweb.cz/")
+        self.assertFalse(_has_issue(issues, IssueType.HTTP_LINK))
+
 
 class TestExternalLinks(unittest.TestCase):
     def test_external_without_target(self):
@@ -178,6 +191,22 @@ class TestExternalLinks(unittest.TestCase):
         issues = check_structure(html, page_url="https://myweb.cz/")
         self.assertFalse(_has_issue(issues, IssueType.EXTERNAL_LINK))
 
+    def test_protocol_relative_external_detected(self):
+        """//jina-domena.cz je externí odkaz – prohlížeč doplní schéma stránky."""
+        html = '<h1>A</h1><a href="//other.com/page">link</a>'
+        issues = check_structure(html, page_url="https://myweb.cz/")
+        self.assertTrue(_has_issue(issues, IssueType.EXTERNAL_LINK))
+
+    def test_protocol_relative_same_domain_internal(self):
+        html = '<h1>A</h1><a href="//www.myweb.cz/page">link</a>'
+        issues = check_structure(html, page_url="https://myweb.cz/")
+        self.assertFalse(_has_issue(issues, IssueType.EXTERNAL_LINK))
+
+    def test_uppercase_scheme_external_detected(self):
+        html = '<h1>A</h1><a href="HTTPS://other.com/page">link</a>'
+        issues = check_structure(html, page_url="https://myweb.cz/")
+        self.assertTrue(_has_issue(issues, IssueType.EXTERNAL_LINK))
+
 
 class TestForbiddenContent(unittest.TestCase):
     def test_lorem_ipsum(self):
@@ -200,6 +229,31 @@ class TestForbiddenContent(unittest.TestCase):
         html = '<h1>A</h1><script>var x = "asdf";</script><p>Čistý text</p>'
         issues = check_structure(html)
         self.assertFalse(_has_issue(issues, IssueType.FORBIDDEN_CONTENT))
+
+    def test_common_czech_words_not_flagged(self):
+        """'testujeme' / 'text zde' jsou běžná slova – dřív dávala −20 bodů."""
+        html = ("<h1>Naše služby</h1>"
+                "<p>Testujeme každý vůz před prodejem. Text zde najdete níže. "
+                "Nadpis zde není žádný problém.</p>")
+        issues = check_structure(html)
+        self.assertFalse(_has_issue(issues, IssueType.FORBIDDEN_CONTENT))
+
+    def test_word_boundary_substring_not_flagged(self):
+        """'asdf' uvnitř jiného slova (např. kód produktu) není placeholder."""
+        html = "<h1>A</h1><p>Produkt XASDFQ-200, model qwertyx.</p>"
+        issues = check_structure(html)
+        self.assertFalse(_has_issue(issues, IssueType.FORBIDDEN_CONTENT))
+
+    def test_phrase_with_extra_whitespace(self):
+        """Fráze rozdělená víc mezerami / novým řádkem se má najít."""
+        html = "<h1>A</h1><p>Lorem\n   ipsum dolor</p>"
+        issues = check_structure(html)
+        self.assertTrue(_has_issue(issues, IssueType.FORBIDDEN_CONTENT))
+
+    def test_case_insensitive(self):
+        html = "<h1>A</h1><p>TESTOVACÍ TEXT</p>"
+        issues = check_structure(html)
+        self.assertTrue(_has_issue(issues, IssueType.FORBIDDEN_CONTENT))
 
 
 class TestLangAndViewport(unittest.TestCase):
@@ -428,6 +482,153 @@ class TestStagingUrl(unittest.TestCase):
         self.assertIsNotNone(issue)
         # Položky mají formát "[<kontext>] <url>"
         self.assertTrue(all(item.startswith("[") for item in issue.items))
+
+
+class TestTitle(unittest.TestCase):
+    """Kontrola 14: <title> na každé stránce."""
+
+    def test_missing_title(self):
+        issues = check_structure("<html><head></head><body><h1>x</h1></body></html>",
+                                 page_url="https://example.cz/a")
+        self.assertTrue(_has_issue(issues, IssueType.MISSING_TITLE))
+
+    def test_empty_title(self):
+        issues = check_structure("<html><head><title>   </title></head></html>",
+                                 page_url="https://example.cz/a")
+        self.assertTrue(_has_issue(issues, IssueType.MISSING_TITLE))
+
+    def test_present_title_ok(self):
+        issues = check_structure("<html><head><title>Kontakt</title></head></html>",
+                                 page_url="https://example.cz/a")
+        self.assertFalse(_has_issue(issues, IssueType.MISSING_TITLE))
+
+    def test_svg_title_in_body_does_not_count(self):
+        """<title> uvnitř inline <svg> není titulek stránky."""
+        html = ("<html><head></head><body>"
+                "<svg><title>Ikona</title></svg></body></html>")
+        issues = check_structure(html, page_url="https://example.cz/a")
+        self.assertTrue(_has_issue(issues, IssueType.MISSING_TITLE))
+
+    def test_extract_title_collapses_whitespace(self):
+        html = "<html><head><title>  Naše \n  firma </title></head><body></body></html>"
+        self.assertEqual(extract_title(html), "Naše firma")
+        self.assertEqual(extract_title("<p>bez head</p>"), "")
+
+    def test_extract_title_ignores_svg_after_head(self):
+        html = ("<html><head></head><body>"
+                "<svg><title>Ikona</title></svg></body></html>")
+        self.assertEqual(extract_title(html), "")
+
+
+class TestDuplicateTitles(unittest.TestCase):
+    """Kontrola 16: stejný <title> napříč webem (mark_duplicate_titles)."""
+
+    @staticmethod
+    def _r(url, title, category="ok"):
+        return {"url": url, "title": title, "w3c_category": category,
+                "structure_issues": []}
+
+    def test_marks_all_pages_in_group(self):
+        results = [self._r("https://e.cz/a", "Firma"),
+                   self._r("https://e.cz/b", "  firma "),   # case + mezery
+                   self._r("https://e.cz/c", "Kontakt")]
+        n = mark_duplicate_titles(results)
+        self.assertEqual(n, 1)
+        a, b, c = (r["structure_issues"] for r in results)
+        self.assertTrue(_has_issue(a, IssueType.DUPLICATE_TITLE))
+        self.assertTrue(_has_issue(b, IssueType.DUPLICATE_TITLE))
+        self.assertEqual(c, [])
+        ia = _get_issue(a, IssueType.DUPLICATE_TITLE)
+        self.assertEqual(ia.items, ["https://e.cz/b"])   # ostatní URL ve skupině
+        self.assertEqual(ia.count, 2)
+        # Stejný label pro celou skupinu → v Excelu jeden řádek
+        self.assertEqual(ia.label, _get_issue(b, IssueType.DUPLICATE_TITLE).label)
+        self.assertIn('"Firma"', ia.label)
+
+    def test_empty_and_unreachable_pages_skipped(self):
+        results = [self._r("https://e.cz/a", ""),
+                   self._r("https://e.cz/b", ""),
+                   self._r("https://e.cz/c", "X", category="validator_error"),
+                   self._r("https://e.cz/d", "X")]
+        self.assertEqual(mark_duplicate_titles(results), 0)
+        for r in results:
+            self.assertEqual(r["structure_issues"], [])
+
+    def test_missing_title_key_tolerated(self):
+        """Starší výsledky bez klíče 'title' nesmí spadnout."""
+        results = [{"url": "u", "w3c_category": "ok", "structure_issues": []}]
+        self.assertEqual(mark_duplicate_titles(results), 0)
+
+
+class TestCanonical(unittest.TestCase):
+    """Kontrola 15: <link rel="canonical">."""
+    PAGE = "https://www.example.cz/o-nas/"
+
+    def _check(self, head, page_url=PAGE):
+        html = f"<html><head><title>T</title>{head}</head><body><h1>x</h1></body></html>"
+        return check_structure(html, page_url=page_url)
+
+    def test_missing_canonical(self):
+        issues = self._check("")
+        self.assertTrue(_has_issue(issues, IssueType.MISSING_CANONICAL))
+
+    def test_empty_href_counts_as_missing(self):
+        issues = self._check('<link rel="canonical" href="">')
+        issue = _get_issue(issues, IssueType.MISSING_CANONICAL)
+        self.assertIsNotNone(issue)
+        self.assertIn("prázdný", issue.detail)
+
+    def test_self_canonical_ok_despite_www_and_slash(self):
+        issues = self._check('<link rel="canonical" href="https://example.cz/o-nas">')
+        for t in (IssueType.MISSING_CANONICAL, IssueType.CANONICAL_MISMATCH,
+                  IssueType.CANONICAL_HTTP):
+            self.assertFalse(_has_issue(issues, t), t)
+
+    def test_relative_self_canonical_ok(self):
+        issues = self._check('<link rel="canonical" href="/o-nas/">')
+        self.assertFalse(_has_issue(issues, IssueType.CANONICAL_MISMATCH))
+
+    def test_canonical_to_other_page_is_mismatch(self):
+        issues = self._check('<link rel="canonical" href="https://example.cz/">')
+        issue = _get_issue(issues, IssueType.CANONICAL_MISMATCH)
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue.items, ["https://example.cz/"])
+
+    def test_canonical_with_query_is_mismatch(self):
+        issues = self._check('<link rel="canonical" href="https://example.cz/o-nas?page=2">')
+        self.assertTrue(_has_issue(issues, IssueType.CANONICAL_MISMATCH))
+
+    def test_multiple_canonicals_reported(self):
+        issues = self._check('<link rel="canonical" href="https://example.cz/o-nas">'
+                             '<link rel="canonical" href="https://example.cz/">')
+        issue = _get_issue(issues, IssueType.CANONICAL_MISMATCH)
+        self.assertIsNotNone(issue)
+        self.assertIn("2x", issue.detail)
+
+    def test_http_canonical_on_https_page(self):
+        issues = self._check('<link rel="canonical" href="http://example.cz/o-nas">')
+        self.assertTrue(_has_issue(issues, IssueType.CANONICAL_HTTP))
+        # Jinak míří správně → žádný mismatch navíc
+        self.assertFalse(_has_issue(issues, IssueType.CANONICAL_MISMATCH))
+
+    def test_http_canonical_on_http_page_is_fine(self):
+        issues = self._check('<link rel="canonical" href="http://example.cz/o-nas">',
+                             page_url="http://example.cz/o-nas")
+        self.assertFalse(_has_issue(issues, IssueType.CANONICAL_HTTP))
+
+    def test_staging_canonical_not_double_reported(self):
+        """Canonical na staging hlásí kontrola 13 – mismatch se nepřidává."""
+        issues = self._check('<link rel="canonical" href="https://web.poskireal.cz/o-nas">')
+        self.assertTrue(_has_issue(issues, IssueType.STAGING_URL))
+        self.assertFalse(_has_issue(issues, IssueType.CANONICAL_MISMATCH))
+
+    def test_skipped_on_local_and_dev_hosts(self):
+        for url in ("http://localhost:8000/o-nas", "https://web.poskireal.cz/o-nas"):
+            issues = self._check("", page_url=url)
+            self.assertFalse(_has_issue(issues, IssueType.MISSING_CANONICAL), url)
+            issues = self._check('<link rel="canonical" href="https://example.cz/o-nas">',
+                                 page_url=url)
+            self.assertFalse(_has_issue(issues, IssueType.CANONICAL_MISMATCH), url)
 
 
 class TestHomepageMeta(unittest.TestCase):

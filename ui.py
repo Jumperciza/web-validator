@@ -245,11 +245,11 @@ def print_banner() -> None:
     """Úvodní banner při spuštění."""
     print()
     info("=" * 62); print()
-    print("  "); bold("Web Validator"); gray("  |  vytvořil Péťa"); print()
+    print("  ", end=""); bold("Web Validator"); gray("  |  vytvořil Péťa"); print()
     info("=" * 62); print()
-    print(f"  {bold('Co kontroluje:')} ")
-    print(f"    "); ok("1."); print(" W3C validace HTML (přes lokální vnu.jar)")
-    print(f"    "); ok("2."); print(" Struktura HTML:")
+    print("  ", end=""); bold("Co kontroluje:"); print()
+    print("    ", end=""); ok("1."); print(" W3C validace HTML (přes lokální vnu.jar)")
+    print("    ", end=""); ok("2."); print(" Struktura HTML:")
     for item in ["existence a duplikáty <h1>",
                  "pořadí nadpisů (žádné přeskočení)",
                  "prázdné tagy", "duplicitní ID", "meta description",
@@ -260,9 +260,9 @@ def print_banner() -> None:
                  "noindex meta tag (mimo dev domény)",
                  "URL ukazující na staging/dev domény (canonical, og:image, src…)"]:
         gray(f"       - {item}"); print()
-    print(f"    "); ok("3."); print(" Meta title a description délka (jen homepage)")
-    print(f"    "); ok("4."); print(" Kontrola robots.txt – Disallow: / a blokování CSS/JS pro Googlebot")
-    print(f"    "); ok("5."); print(" Kontrola existence uživatelské sekce (/uzivatel/)")
+    print("    ", end=""); ok("3."); print(" Meta title a description délka (jen homepage)")
+    print("    ", end=""); ok("4."); print(" Kontrola robots.txt – Disallow: / a blokování CSS/JS pro Googlebot")
+    print("    ", end=""); ok("5."); print(" Kontrola existence uživatelské sekce (/uzivatel/)")
     info("=" * 62); print()
     print()
 

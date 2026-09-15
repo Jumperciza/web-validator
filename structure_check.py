@@ -2,7 +2,6 @@
 Kontrola HTML struktury.
 
 Vrací List[Issue] — strukturovaná data (viz issues.py).
-Pro zpětnou kompatibilitu je tu ještě `check_structure_legacy()` co vrací list stringů.
 
 Prováděné kontroly:
   1.  Existence a duplikáty <h1>
@@ -18,15 +17,22 @@ Prováděné kontroly:
   11. Chybějící <meta name="viewport">
   12. <meta name="robots" content="noindex"> mimo dev domény
   13. URL ukazující na staging/dev domény (canonical, og:image, src, href...)
+  14. <title> existuje a není prázdný (na každé stránce, ne jen na homepage)
+  15. <link rel="canonical"> – existuje, míří sám na sebe, není http:// na https
+
+Napříč webem (po zpracování všech stránek, viz `mark_duplicate_titles`):
+  16. Duplicitní <title> na více stránkách
 
 Pro lokální / privátní hosty (localhost, 127.0.0.1, *.local…) se přeskočí
 kontroly které pro lokální vývoj nedávají smysl: HTTP odkazy, noindex,
-staging URL detekce.
+staging URL detekce, canonical.
 """
 import copy
+import importlib.util
 import re
+from collections import defaultdict
 from typing import List
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -39,11 +45,14 @@ _EMPTY_TAGS = ["p", "div", "span", "section", "article",
                "li", "td", "th", "h1", "h2", "h3", "h4", "h5", "h6"]
 
 # ── Zakázaná slova / testovací obsah ─────────────────────────────────────────
-# Použity jen konkrétní výrazy — "lorem" samotné je příliš obecné (false-positive
-# na textech o latině). "lorem ipsum" je specifický a jednoznačný.
+# Použity jen konkrétní, jednoznačné výrazy. Hledá se jako CELÉ SLOVO / FRÁZE
+# (hranice slov), ne jako podřetězec — "asdf" tak nechytne "basdfoo".
+#
+# Záměrně tu NEJSOU běžná česká slova, která dřív dělala falešné poplachy
+# (a každý = −20 bodů): "testujeme" (= "testujeme každý vůz"), "text zde"
+# (= "text zde najdete"), "nadpis zde". Samotné "lorem" je také příliš obecné.
 _FORBIDDEN_WORDS: list[str] = [
     "lorem ipsum",
-    "testujeme",
     "testovaci text",
     "testovací text",
     "testovaci obsah",
@@ -59,17 +68,17 @@ _FORBIDDEN_WORDS: list[str] = [
     "sample text",
     "změňte tento text",
     "zmente tento text",
-    "text zde",
-    "nadpis zde",
+]
+# Předkompilované regexy: \b = hranice slova (Unicode-aware, funguje i s diakritikou),
+# mezery ve frázi tolerují libovolné bílé znaky (text z HTML může mít víc mezer).
+_FORBIDDEN_RE: list[tuple[str, re.Pattern]] = [
+    (w, re.compile(r"\b" + r"\s+".join(map(re.escape, w.split())) + r"\b", re.I))
+    for w in _FORBIDDEN_WORDS
 ]
 
 # Parser preference — lxml je 3-5× rychlejší než html.parser
 # Fallback na html.parser pokud lxml není nainstalován
-try:
-    import lxml  # type: ignore  # noqa: F401
-    _PARSER = "lxml"
-except ImportError:
-    _PARSER = "html.parser"
+_PARSER = "lxml" if importlib.util.find_spec("lxml") else "html.parser"
 
 
 # ── Pomocné funkce ───────────────────────────────────────────────────────────
@@ -78,20 +87,40 @@ def _netloc_bare(url: str) -> str:
     return urlparse(url).netloc.lower().removeprefix("www.")
 
 
+def _is_http_scheme(href: str) -> bool:
+    """True pro odkaz s http:// schématem (case-insensitive – HTML schéma
+    nerozlišuje velikost písmen, `HTTP://` je stejně nezabezpečený)."""
+    return href.lower().startswith("http://")
+
+
 def _is_external(href: str, page_url: str) -> bool:
-    if not href.startswith(("http://", "https://")):
+    """
+    True pokud href míří na jinou doménu než auditovaná stránka.
+    Bere absolutní URL (http/https, bez ohledu na velikost písmen schématu)
+    i protokol-relativní URL (`//cdn.example.com/…`), které prohlížeč
+    rozvine na aktuální schéma – jsou to tedy plnohodnotné externí odkazy.
+    """
+    h = href.lower()
+    if h.startswith("//"):
+        href = "https:" + href
+    elif not h.startswith(("http://", "https://")):
         return False
     if not page_url:
         return True
     return _netloc_bare(href) != _netloc_bare(page_url)
 
 
-def _has_safe_rel(tag) -> bool:
-    """True pokud rel obsahuje noopener nebo noreferrer."""
+def _rel_values(tag) -> list[str]:
+    """Hodnoty atributu rel jako lowercase seznam (BS4 vrací list i str)."""
     rel = tag.get("rel", [])
     if isinstance(rel, str):
         rel = rel.split()
-    return bool({"noopener", "noreferrer"} & {r.lower() for r in rel})
+    return [r.lower() for r in rel]
+
+
+def _has_safe_rel(tag) -> bool:
+    """True pokud rel obsahuje noopener nebo noreferrer."""
+    return bool({"noopener", "noreferrer"} & set(_rel_values(tag)))
 
 
 def _is_dev_noindex_domain(url: str) -> bool:
@@ -127,6 +156,33 @@ def _is_staging_url(url: str) -> bool:
     if not netloc:
         return False
     return any(p in netloc for p in STAGING_DOMAIN_PATTERNS)
+
+
+def _page_title(soup: BeautifulSoup) -> str:
+    """
+    Text <title> z hlavičky dokumentu (whitespace sbalený), "" pokud chybí.
+    Hledáme přednostně v <head> – `<title>` je i platný element uvnitř
+    inline <svg> v těle stránky a `soup.find("title")` by ho na stránce
+    bez skutečného titulku chytil místo něj.
+    """
+    scope = soup.head if soup.head is not None else soup
+    title = scope.find("title")
+    if title is None:
+        return ""
+    return " ".join(title.get_text().split())
+
+
+def _canonical_key(url: str) -> str:
+    """
+    Klíč pro porovnání canonical ↔ URL stránky: bez schématu (http vs. https
+    řeší samostatná kontrola), bez www., bez koncového lomítka a fragmentu.
+    Query zůstává – canonical na `?page=2` míří skutečně na jinou stránku.
+    """
+    p = urlparse(url)
+    key = p.netloc.lower().removeprefix("www.") + p.path.rstrip("/")
+    if p.query:
+        key += "?" + p.query
+    return key
 
 
 def _extract_urls_from_srcset(srcset: str) -> list[str]:
@@ -242,7 +298,7 @@ def check_structure(html: str, page_url: str = "") -> List[Issue]:
     if not page_is_local:
         http_links = list(dict.fromkeys(
             a["href"].strip() for a in soup.find_all("a", href=True)
-            if a["href"].strip().startswith("http://")
+            if _is_http_scheme(a["href"].strip())
             and not is_local_url(a["href"].strip())
         ))
         if http_links:
@@ -286,8 +342,8 @@ def check_structure(html: str, page_url: str = "") -> List[Issue]:
     page_text = soup_text.get_text(" ", strip=True).lower()
 
     found_words: list[str] = []
-    for word in _FORBIDDEN_WORDS:
-        if word in page_text and word not in found_words:
+    for word, pattern in _FORBIDDEN_RE:
+        if pattern.search(page_text) and word not in found_words:
             found_words.append(word)
     if found_words:
         issues.append(Issue(
@@ -378,10 +434,7 @@ def check_structure(html: str, page_url: str = "") -> List[Issue]:
         # ── <link href> — speciální zacházení kvůli rel atributu
         # canonical má nejvyšší prioritu (zničí SEO když ukazuje na staging)
         for link in soup.find_all("link", href=True):
-            rel = link.get("rel", [])
-            if isinstance(rel, str):
-                rel = rel.split()
-            rel_lower = [r.lower() for r in rel]
+            rel_lower = _rel_values(link)
             if "canonical" in rel_lower:
                 _record("canonical", link["href"])
             elif "alternate" in rel_lower:
@@ -410,7 +463,101 @@ def check_structure(html: str, page_url: str = "") -> List[Issue]:
                 count=len(staging_findings),
             ))
 
+    # 14. <title> — na každé stránce. Délku hlídá jen homepage
+    # (check_homepage_meta), ale chybějící/prázdný title je chyba všude:
+    # Google pak vymýšlí vlastní titulek a v záložce je holá URL.
+    if not _page_title(soup):
+        issues.append(Issue(type=IssueType.MISSING_TITLE))
+
+    # 15. Canonical — přeskočeno na dev/lokálních doménách: tam canonical
+    # běžně (a správně) ukazuje na produkci, hlásili bychom falešný nesoulad.
+    if not _is_dev_noindex_domain(page_url):
+        canonicals = [link for link in soup.find_all("link", href=True)
+                      if "canonical" in _rel_values(link)]
+        hrefs = [c["href"].strip() for c in canonicals if c["href"].strip()]
+        if not hrefs:
+            issues.append(Issue(
+                type=IssueType.MISSING_CANONICAL,
+                detail="prázdný href" if canonicals else "",
+            ))
+        else:
+            href = hrefs[0]
+            if len(hrefs) > 1:
+                # Víc canonicalů = Google je ignoruje všechny. Hlásíme jako
+                # nesoulad, konkrétní hodnoty v items.
+                issues.append(Issue(
+                    type=IssueType.CANONICAL_MISMATCH,
+                    detail=f"Nalezeno {len(hrefs)}x <link rel=\"canonical\">",
+                    items=hrefs[:10], count=len(hrefs),
+                ))
+            elif page_url and not _is_staging_url(href):
+                # Staging canonical už hlásí kontrola 13 – nepenalizovat dvakrát.
+                resolved = urljoin(page_url, href)
+                if _canonical_key(resolved) != _canonical_key(page_url):
+                    issues.append(Issue(
+                        type=IssueType.CANONICAL_MISMATCH,
+                        items=[resolved], count=1,
+                        detail=f"stránka {page_url} → canonical {resolved}",
+                    ))
+            if page_url and urlparse(page_url).scheme.lower() == "https" \
+                    and _is_http_scheme(href):
+                issues.append(Issue(
+                    type=IssueType.CANONICAL_HTTP,
+                    items=[href], count=1,
+                ))
+
     return issues
+
+
+def mark_duplicate_titles(results: list) -> int:
+    """
+    Kontrola napříč webem: stejný <title> na více stránkách.
+
+    Volá se jednou po zpracování všech stránek. Každé postižené stránce
+    přidá do `structure_issues` Issue DUPLICATE_TITLE s textem titulku
+    v `detail` a ostatními URL se stejným titulkem v `items`.
+    Porovnává se bez ohledu na velikost písmen a nadbytečné mezery;
+    prázdné tituly se přeskakují (ty hlásí MISSING_TITLE per stránka).
+
+    Vrátí počet různých duplicitních titulků.
+    """
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for r in results:
+        title = " ".join((r.get("title") or "").split())
+        if title and r.get("w3c_category") != "validator_error":
+            groups[title.lower()].append(r)
+
+    n_dupes = 0
+    for pages in groups.values():
+        if len(pages) < 2:
+            continue
+        n_dupes += 1
+        # Stejný detail (= label) pro celou skupinu, i když se tituly liší
+        # jen velikostí písmen – Excel je pak seskupí do jednoho řádku.
+        shown_title = " ".join(pages[0]["title"].split())[:80]
+        for r in pages:
+            others = [o["url"] for o in pages if o is not r]
+            r.setdefault("structure_issues", []).append(Issue(
+                type=IssueType.DUPLICATE_TITLE,
+                detail=shown_title,
+                items=others[:50],
+                count=len(pages),
+            ))
+    return n_dupes
+
+
+_HEAD_END_RE = re.compile(r"</head\s*>", re.I)
+
+
+def extract_title(html: str) -> str:
+    """
+    Text <title> stránky pro kontrolu duplicit napříč webem (main.py si ho
+    ukládá k výsledku). Parsuje jen část dokumentu po </head> – u velkých
+    stránek je to výrazně levnější než druhý plný průchod parserem.
+    """
+    m = _HEAD_END_RE.search(html)
+    fragment = html[:m.end()] if m else html
+    return _page_title(BeautifulSoup(fragment, _PARSER))
 
 
 def check_homepage_meta(html: str) -> list:

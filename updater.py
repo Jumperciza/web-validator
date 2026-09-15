@@ -6,7 +6,7 @@ from pathlib import Path
 
 import requests
 
-from colors import ok, warn, err, info, gray, bold
+from colors import ok, warn, err, info, gray
 from validator_w3c import get_local_version
 
 GITHUB_API = "https://api.github.com/repos/validator/validator/releases/latest"
@@ -35,6 +35,14 @@ def _extract_version(s: str) -> tuple:
 
 
 def check_and_update(jar_path: str, non_interactive: bool = False) -> str:
+    """
+    Porovná lokální vnu.jar s posledním GitHub release a případně nabídne
+    stažení. Vrátí cestu k jar souboru (nové nebo původní).
+
+    non_interactive=True → nikdy se neptá a NIC nestahuje (jen ohlásí, že je
+    k dispozici novější verze). Aktualizace je zásah do souborů, proto ji
+    v neinteraktivním režimu (CI, skripty) neprovádíme automaticky.
+    """
     gray("  Kontroluji verzi vnu.jar..."); print()
     time.sleep(0.3)
 
@@ -76,7 +84,7 @@ def check_and_update(jar_path: str, non_interactive: bool = False) -> str:
         return jar_path
 
     if local_ver >= gh_ver:
-        ok(f"  [✓]"); print(f" vnu.jar je aktuální (verze {local_v}).")
+        ok("  [✓]"); print(f" vnu.jar je aktuální (verze {local_v}).")
         return jar_path
 
     # Je dostupná novější verze
@@ -93,7 +101,7 @@ def check_and_update(jar_path: str, non_interactive: bool = False) -> str:
         warn("  [!]"); print(" vnu.jar nebyl nalezen v GitHub release assets.")
         return jar_path
 
-    # Non-interactive mode: automatická aktualizace bez dotazu
+    # Non-interactive mode: neptáme se a nestahujeme – jen informujeme
     if non_interactive:
         gray("  (non-interactive mód – aktualizace přeskočena)"); print()
         return jar_path
@@ -129,7 +137,7 @@ def check_and_update(jar_path: str, non_interactive: bool = False) -> str:
 
         dest.unlink(missing_ok=True)
         tmp.rename(dest)
-        ok("  [✓]"); print(f" Aktualizace úspěšná!")
+        ok("  [✓]"); print(" Aktualizace úspěšná!")
         return str(dest)
 
     except Exception as e:

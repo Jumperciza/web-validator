@@ -25,7 +25,7 @@ from pathlib import Path
 
 import requests
 
-from colors import gray, warn
+from colors import warn
 from config import W3C_TIMEOUT
 
 # Globální cesta k vnu.jar – nastaví se při startu
@@ -38,6 +38,8 @@ MIN_JAVA_MAJOR = 11
 _server_proc: subprocess.Popen | None = None
 _server_port: int                     = 0
 _server_lock = threading.Lock()
+# atexit hook registrujeme jen jednou (ne při každém (re)startu serveru)
+_atexit_registered: bool = False
 # Flag aby se warning o smrti serveru vypsal jen jednou (z více threadů)
 _server_death_reported: bool = False
 
@@ -155,7 +157,7 @@ def start_server(jar_path: str) -> bool:
 
     Server běží na pozadí a ukončí se při exitu programu (atexit hook).
     """
-    global _server_proc, _server_port, _server_death_reported
+    global _server_proc, _server_port, _server_death_reported, _atexit_registered
 
     with _server_lock:
         if _server_proc is not None and _server_proc.poll() is None:
@@ -179,34 +181,42 @@ def start_server(jar_path: str) -> bool:
             return False
 
         if not _wait_for_server(port, timeout=20):
-            stop_server()
+            # Držíme _server_lock (není reentrantní) → nesmíme volat stop_server()
+            _stop_server_locked()
             return False
 
         _server_port = port
         _server_death_reported = False   # Reset pro případ restartu
 
-        # Registruj cleanup při exitu
-        atexit.register(stop_server)
+        # Registruj cleanup při exitu (jen jednou za běh programu)
+        if not _atexit_registered:
+            atexit.register(stop_server)
+            _atexit_registered = True
         return True
+
+
+def _stop_server_locked() -> None:
+    """Ukončí server proces. Volající MUSÍ držet _server_lock."""
+    global _server_proc, _server_port
+    if _server_proc is None:
+        return
+    try:
+        _server_proc.terminate()
+        try:
+            _server_proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            _server_proc.kill()
+            _server_proc.wait(timeout=2)
+    except Exception:
+        pass
+    _server_proc = None
+    _server_port = 0
 
 
 def stop_server() -> None:
     """Ukončí vnu.jar server pokud běží."""
-    global _server_proc, _server_port
     with _server_lock:
-        if _server_proc is None:
-            return
-        try:
-            _server_proc.terminate()
-            try:
-                _server_proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                _server_proc.kill()
-                _server_proc.wait(timeout=2)
-        except Exception:
-            pass
-        _server_proc = None
-        _server_port = 0
+        _stop_server_locked()
 
 
 def _check_server_alive() -> bool:
@@ -250,7 +260,26 @@ def _check_server_alive() -> bool:
     return False
 
 
-def _validate_via_server(html_bytes: bytes) -> dict | None:
+_CHARSET_RE = re.compile(r"charset\s*=\s*\"?([A-Za-z0-9_.:-]+)", re.I)
+
+
+def _server_content_type(content_type: str) -> str:
+    """
+    Sestaví Content-Type pro vnu server z hlavičky, kterou poslal web.
+
+    Dřív se posílalo natvrdo `charset=utf-8` – pro web ve windows-1250 pak
+    vnu hlásil hromadu "Malformed byte sequence" chyb, které web nemá.
+    Předáme tedy charset z HTTP hlavičky webu; když web žádný neposlal,
+    necháme vnu sniffovat (BOM, <meta charset>) – přesně jako prohlížeč –
+    a případné "character encoding was not declared" je pak legitimní nález.
+    """
+    m = _CHARSET_RE.search(content_type or "")
+    if m:
+        return f"text/html; charset={m.group(1)}"
+    return "text/html"
+
+
+def _validate_via_server(html_bytes: bytes, content_type: str = "") -> dict | None:
     """
     Pošle HTML na běžící vnu server přes HTTP.
     Vrátí raw JSON dict nebo None při chybě → fallback na subprocess.
@@ -261,7 +290,7 @@ def _validate_via_server(html_bytes: bytes) -> dict | None:
         resp = requests.post(
             f"http://127.0.0.1:{_server_port}/?out=json",
             data=html_bytes,
-            headers={"Content-Type": "text/html; charset=utf-8"},
+            headers={"Content-Type": _server_content_type(content_type)},
             timeout=W3C_TIMEOUT,
         )
         if resp.status_code == 200:
@@ -303,6 +332,16 @@ def _classify(messages: list) -> dict:
 
 # ── Subprocess fallback ──────────────────────────────────────────────────────
 
+def _skipped(msg: str) -> dict:
+    """
+    Result dict pro stav "W3C validace neproběhla" (chybí jar / Java, timeout,
+    nečitelný výstup…). Kategorie `skipped` NENÍ chyba stránky — stránka se
+    stáhla v pořádku, jen ji nešlo zvalidovat. Skóre se počítá jen ze struktury.
+    (Kategorii `validator_error` používá main.py výhradně pro nedostupnou stránku.)
+    """
+    return {"category": "skipped", "warnings": [], "errors": [], "error_msg": msg}
+
+
 def _validate_via_subprocess(html_bytes: bytes, jar_path: str) -> dict:
     """Fallback — spustí `java -jar vnu.jar` pro každou stránku."""
     try:
@@ -319,26 +358,21 @@ def _validate_via_subprocess(html_bytes: bytes, jar_path: str) -> dict:
             raw = result.stdout.decode("utf-8", errors="replace").strip()
 
         if not raw:
-            return {"category": "validator_error", "warnings": [], "errors": [],
-                    "error_msg": f"vnu.jar prázdný výstup (returncode={result.returncode})"}
+            return _skipped(f"vnu.jar prázdný výstup (returncode={result.returncode})")
 
         if "UnsupportedClassVersionError" in raw:
-            return {"category": "validator_error", "warnings": [], "errors": [],
-                    "error_msg": "Java je příliš stará! vnu.jar vyžaduje Javu 11+. Stáhni na adoptium.net"}
+            return _skipped("Java je příliš stará! vnu.jar vyžaduje Javu 11+. Stáhni na adoptium.net")
 
         data = json.loads(raw)
         return _build_result(data.get("messages", []))
 
     except FileNotFoundError:
-        return {"category": "validator_error", "warnings": [], "errors": [],
-                "error_msg": "Java neni nainstalovana – stahni na adoptium.net"}
+        return _skipped("Java není nainstalována – stáhni na adoptium.net")
     except json.JSONDecodeError as je:
         preview = (result.stderr + result.stdout).decode("utf-8", errors="replace")[:300]
-        return {"category": "validator_error", "warnings": [], "errors": [],
-                "error_msg": f"JSON chyba: {je} | vystup: {preview}"}
+        return _skipped(f"JSON chyba: {je} | výstup: {preview}")
     except Exception as e:
-        return {"category": "validator_error", "warnings": [], "errors": [],
-                "error_msg": str(e)}
+        return _skipped(str(e))
 
 
 def _build_result(messages: list) -> dict:
@@ -354,19 +388,25 @@ def _build_result(messages: list) -> dict:
 
 # ── Hlavní API ───────────────────────────────────────────────────────────────
 
-def validate(html_bytes: bytes, jar: str = "") -> dict:
+def validate(html_bytes: bytes, jar: str = "", content_type: str = "") -> dict:
     """
-    Validuje HTML přes vnu.jar. Vrátí result dict.
+    Validuje HTML přes vnu.jar. Vrátí result dict {category, warnings, errors, error_msg}.
     Pokud server mód běží, použije ho. Jinak fallback na subprocess.
+
+    content_type = hodnota HTTP hlavičky Content-Type, kterou poslal web
+    (kvůli správnému charsetu; prázdná = nechat vnu sniffovat).
+
+    category:
+      ok / warning / error / warning_error – výsledek validace
+      skipped                              – validace neproběhla (chybí jar, Java, …)
     """
     jar_path = jar or vnu_jar
     if not jar_path:
-        return {"category": "validator_error", "warnings": [], "errors": [],
-                "error_msg": "vnu.jar nenalezen"}
+        return _skipped("vnu.jar nenalezen")
 
     # Zkus server mód (pokud je server spuštěný a živý)
     if _server_port != 0:
-        data = _validate_via_server(html_bytes)
+        data = _validate_via_server(html_bytes, content_type)
         if data is not None:
             return _build_result(data.get("messages", []))
         # Server neodpovídá nebo zemřel — spadneme na subprocess
