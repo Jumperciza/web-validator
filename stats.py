@@ -17,7 +17,9 @@ Kategorie penalizací:
   • STŘEDNÍ  (−8 až −10)    — horší UX nebo accessibility
   • MENŠÍ    (−0.5 až −5)   — kosmetika, validita HTML
 
-Nenačtené stránky (HTTP chyba) dostanou 0 bodů.
+Nenačtené stránky (HTTP chyba, category "validator_error") dostanou 0 bodů.
+Stránky kde W3C validace neproběhla (category "skipped" – chybí vnu.jar/Java)
+se hodnotí jen podle struktury – nejsou penalizované za to, že validátor nebyl.
 Samotné W3C varování skóre neovlivňují (jen chyby).
 """
 from dataclasses import dataclass
@@ -34,14 +36,21 @@ _BINARY_PENALTIES: dict[IssueType, float] = {
     IssueType.NOINDEX:            25,   # web nebude indexován Googlem = SEO katastrofa
     IssueType.FORBIDDEN_CONTENT:  20,   # lorem ipsum v produkci = katastrofa
     IssueType.MISSING_H1:         15,
+    IssueType.MISSING_TITLE:      15,   # bez <title> Google vymýšlí vlastní, záložka = URL
     IssueType.MISSING_META_DESC:  15,
     IssueType.EMPTY_META_DESC:    15,
     IssueType.MISSING_VIEWPORT:   15,
 
     # Střední
     IssueType.MISSING_LANG:       10,
+    IssueType.CANONICAL_MISMATCH: 10,   # stránka říká Googlu "indexuj místo mě jinou"
     IssueType.MULTIPLE_H1:         8,
+    IssueType.CANONICAL_HTTP:      8,   # canonical na http:// verzi = duplicitní obsah
     IssueType.HEADING_SKIP:        5,
+    IssueType.DUPLICATE_TITLE:     5,   # každá z duplicitních stránek −5
+
+    # Menší
+    IssueType.MISSING_CANONICAL:   3,   # doporučení, ne povinnost – nízká váha
 }
 
 # Penalizace za problémy které se kumulují s počtem výskytů.
@@ -73,8 +82,9 @@ class Stats:
     w3c_ok:    int = 0
     w3c_warn:  int = 0
     w3c_err:   int = 0
-    w3c_failed: int = 0  # nepodařilo se načíst (validator_error)
-    struct_ok:  int = 0
+    w3c_failed: int = 0  # nepodařilo se načíst stránku (validator_error)
+    w3c_skipped: int = 0 # W3C validace neproběhla (skipped – chybí vnu.jar/Java)
+    struct_ok:  int = 0  # stránky bez strukturálních problémů (jen načtené)
     struct_bad: int = 0
     score:      int = 0  # 0–100 (váhové skóre, viz _page_score)
 
@@ -148,9 +158,16 @@ def compute_stats(results: list) -> Stats:
             s.w3c_warn += 1
             s.w3c_err  += 1
         elif cat == "validator_error":     s.w3c_failed += 1
+        elif cat == "skipped":             s.w3c_skipped += 1
 
-        if has_struct_issues: s.struct_bad += 1
-        else:                 s.struct_ok  += 1
+        # Nedostupná stránka nemá strukturu co hodnotit — nepočítáme ji
+        # ani jako "Struktura OK" (dřív to zkreslovalo souhrn).
+        if cat == "validator_error":
+            pass
+        elif has_struct_issues:
+            s.struct_bad += 1
+        else:
+            s.struct_ok += 1
 
         # Per-page skóre — váhové
         page_scores.append(_page_score(r))

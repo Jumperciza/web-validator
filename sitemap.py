@@ -3,24 +3,25 @@ Sitemap ingestion – načte URL ze sitemap.xml (včetně sitemap index souborů
 
 Postup:
   1. Zkontroluje robots.txt pro Sitemap: direktivu
-  2. Zkusí /sitemap.xml, /sitemap_index.xml, /sitemap-index.xml
+  2. Zkusí /sitemap.xml, /sitemap_index.xml, /sitemap-index.xml, /sitemap.xml.gz
+     (gzip komprimované sitemapy se rozbalí automaticky)
   3. Rekurzivně rozbalí sitemap index → dílčí sitemaps
   4. Filtruje URL přes stejné filtry jako crawler (stejná doména, ignorované přípony…)
 
 Pokud sitemap neexistuje nebo nastane chyba, vrátí prázdný seznam
 a volající kód přepne na klasický crawler.
 """
+import gzip
 import re
-import sys
 import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
 
 import requests
 
-from colors import ok, warn, gray, info
+from colors import warn, gray
 from config import (USER_AGENT, ACCEPT_LANGUAGE, DEFAULT_TIMEOUT,
                     SITEMAP_MAX_DEPTH)
-from crawler import _same_domain, _ignore, _url_key
+from crawler import _ignore, _url_key, is_excluded
 
 UA      = USER_AGENT
 TIMEOUT = DEFAULT_TIMEOUT
@@ -31,14 +32,33 @@ _NS = "http://www.sitemaps.org/schemas/sitemap/0.9"
 
 # ── Interní pomocné funkce ────────────────────────────────────────────────────
 
+def _decode_sitemap_body(content: bytes, content_type: str, url: str) -> str | None:
+    """
+    Z těla odpovědi udělá text sitemapy.
+    Komprimované sitemapy (`sitemap.xml.gz`, běžné u Yoast / velkých e-shopů)
+    poznáme podle gzip magic bytes (1f 8b) – Content-Type i přípona bývají
+    nespolehlivé (application/octet-stream, .gz bez hlavičky…). Requests
+    gzip z `Content-Encoding` rozbalí sám, tady řešíme gzip jako *obsah*.
+    """
+    if content[:2] == b"\x1f\x8b":
+        try:
+            content = gzip.decompress(content)
+        except (OSError, EOFError) as e:
+            gray(f"  (sitemap {url}: poškozený gzip – {e})"); print()
+            return None
+    elif not any(k in content_type for k in ("xml", "text", "html")) \
+            and not url.lower().endswith((".xml", ".gz")):
+        return None
+    return content.decode("utf-8", errors="replace")
+
+
 def _fetch_text(url: str, session: requests.Session) -> str | None:
-    """Stáhne URL a vrátí text, nebo None při jakékoliv chybě."""
+    """Stáhne URL a vrátí text sitemapy (i z .gz), nebo None při jakékoliv chybě."""
     try:
         resp = session.get(url, timeout=TIMEOUT, allow_redirects=True)
         if resp.status_code == 200:
-            ct = resp.headers.get("Content-Type", "")
-            if any(k in ct for k in ("xml", "text", "html")):
-                return resp.text
+            return _decode_sitemap_body(resp.content,
+                                        resp.headers.get("Content-Type", ""), url)
         return None
     except Exception as e:
         gray(f"  (sitemap fetch chyba pro {url}: {e})"); print()
@@ -95,7 +115,7 @@ def _parse_sitemap_xml(xml_text: str) -> tuple[list, list]:
                     text = (loc.text or "").strip()
                     if not text:
                         continue
-                    if text.endswith(".xml") and "sitemap" in text.lower():
+                    if text.endswith((".xml", ".xml.gz")) and "sitemap" in text.lower():
                         sitemap_urls.append(text)
                     else:
                         page_urls.append(text)
@@ -117,12 +137,16 @@ def _parse_sitemap_xml(xml_text: str) -> tuple[list, list]:
                 for loc in root.findall(".//loc"):
                     t = (loc.text or "").strip()
                     if t:
-                        if t.endswith(".xml") and "sitemap" in t.lower():
+                        if t.endswith((".xml", ".xml.gz")) and "sitemap" in t.lower():
                             sitemap_urls.append(t)
                         else:
                             page_urls.append(t)
         except ET.ParseError:
-            gray("  (XML parse chyba, sitemap přeskočena)"); print()
+            # HTML odpověď (soft 404, přesměrování na homepage…) není chyba
+            # sitemapy — tiše přeskočíme, hlásíme jen skutečně rozbité XML.
+            head = xml_text.lstrip()[:100].lower()
+            if not head.startswith(("<!doctype html", "<html")):
+                gray("  (XML parse chyba, sitemap přeskočena)"); print()
 
     return page_urls, sitemap_urls
 
@@ -149,7 +173,8 @@ def _sitemap_candidates(base_url: str, session: requests.Session) -> list[str]:
         pass
 
     # Standardní cesty jako fallback
-    for path in ("/sitemap.xml", "/sitemap_index.xml", "/sitemap-index.xml"):
+    for path in ("/sitemap.xml", "/sitemap_index.xml", "/sitemap-index.xml",
+                 "/sitemap.xml.gz"):
         url = root + path
         if url not in candidates:
             candidates.append(url)
@@ -159,9 +184,13 @@ def _sitemap_candidates(base_url: str, session: requests.Session) -> list[str]:
 
 # ── Veřejné API ───────────────────────────────────────────────────────────────
 
-def fetch_sitemap_urls(base_url: str, max_urls: int = 500) -> list[str]:
+def fetch_sitemap_urls(base_url: str, max_urls: int = 500,
+                       exclude: list | None = None) -> list[str]:
     """
     Pokusí se načíst sitemap.xml a vrátit seznam stránek webu.
+
+    exclude = glob vzory z `--exclude` – filtrují se tady (ne až v main.py),
+    aby vynechané URL nespotřebovaly limit `max_urls`.
 
     Vrátí:
       - Seznam URL (list[str]) pokud sitemap existuje a obsahuje URL.
@@ -194,8 +223,15 @@ def fetch_sitemap_urls(base_url: str, max_urls: int = 500) -> list[str]:
         if xml_text is None:
             return
 
-        found_sitemap = True
         page_urls, sub_sitemaps = _parse_sitemap_xml(xml_text)
+
+        # Sitemap považujeme za nalezenou až když z ní něco vypadne.
+        # Dřív stačilo HTTP 200 — "soft 404" (HTML chybová stránka se
+        # statusem 200) pak zablokovala zkoušení dalších kandidátů
+        # (/sitemap_index.xml …) a web spadl zbytečně do crawleru.
+        if not page_urls and not sub_sitemaps:
+            return
+        found_sitemap = True
 
         # Přidej stránky
         all_page_urls.extend(page_urls)
@@ -234,7 +270,7 @@ def fetch_sitemap_urls(base_url: str, max_urls: int = 500) -> list[str]:
                     foreign_domains.add(url_netloc)
                     foreign_count += 1
                 continue
-            if _ignore(url):
+            if _ignore(url) or is_excluded(url, exclude):
                 continue
             key = _url_key(url)
             if key not in seen_keys:

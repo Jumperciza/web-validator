@@ -8,6 +8,7 @@ Pro lokální host (localhost, 127.0.0.1, *.local…) se vypnou všechny pauzy
 mezi dávkami i `MIN_CRAWL_DELAY` floor. Lokální dev server stejně neexistuje
 důvod ho šetřit a uživatelé chtějí audit co nejrychleji.
 """
+import fnmatch
 import re
 import sys
 import time
@@ -20,7 +21,7 @@ from urllib.robotparser import RobotFileParser
 import requests
 from bs4 import BeautifulSoup
 
-from colors import ok, warn, err, gray
+from colors import ok, gray
 from config import (USER_AGENT, ACCEPT_LANGUAGE, CRAWL_TIMEOUT,
                     CRAWL_WORKERS, MIN_CRAWL_DELAY)
 from ui import is_local_url
@@ -62,10 +63,35 @@ def _ignore(url: str) -> bool:
     return any(p.search(u) for p in _IGNORE_RE)
 
 
-def _fetch(session: requests.Session, url: str) -> tuple:
+def is_excluded(url: str, patterns: list | None) -> bool:
+    """
+    True pokud URL odpovídá některému uživatelskému vzoru z `--exclude`.
+
+    Vzory jsou glob (`*` = cokoliv včetně lomítek, `?` = jeden znak) a
+    porovnávají se case-insensitive proti cestě URL (`/blog/clanek`) i proti
+    celé URL – takže funguje `/blog/*`, `*.pdf` i `https://ex.cz/blog/*`.
+    Koncové lomítko cesty se ignoruje: `/blog` vynechá `/blog` i `/blog/`.
+    Používá fnmatchcase – obyčejný fnmatch je na Windows case-insensitive
+    a na Linuxu ne, chování by se lišilo podle OS.
+    """
+    if not patterns:
+        return False
+    full = url.lower()
+    path = urlparse(full).path.rstrip("/") or "/"
+    for pat in patterns:
+        p = pat.lower().strip()
+        if not p:
+            continue
+        if fnmatch.fnmatchcase(path, p.rstrip("/") or "/") or fnmatch.fnmatchcase(full, p):
+            return True
+    return False
+
+
+def _fetch(session: requests.Session, url: str,
+           timeout: float = CRAWL_TIMEOUT) -> tuple:
     """Stáhne URL a vrátí (url, html_text) nebo (url, None)."""
     try:
-        resp = session.get(url, timeout=CRAWL_TIMEOUT)
+        resp = session.get(url, timeout=timeout)
         ct   = resp.headers.get("Content-Type", "").lower()
         if resp.status_code == 200 and "text/html" in ct:
             return url, resp.text
@@ -75,11 +101,15 @@ def _fetch(session: requests.Session, url: str) -> tuple:
 
 
 def crawl_site(start_url: str, max_pages: int = 500,
-               delay: float = 1.0, timeout: int = 15,
-               seed_urls: list | None = None) -> list:
+               delay: float = 1.0, timeout: float = CRAWL_TIMEOUT,
+               seed_urls: list | None = None,
+               exclude: list | None = None) -> list:
     """
     Crawluje web paralelně.
-    delay = minimální pauza mezi dávkami (přepíše MIN_DELAY pokud je vyšší).
+    delay   = minimální pauza mezi dávkami (přepíše MIN_DELAY pokud je vyšší).
+    timeout = timeout jednoho requestu v sekundách (výchozí CRAWL_TIMEOUT).
+    exclude = glob vzory z `--exclude` (viz is_excluded); odpovídající URL se
+              nestahují ani neprocházejí kvůli odkazům.
 
     Pro lokální host (localhost, 127.0.0.1, *.local…) se delay nastaví na 0
     a `MIN_CRAWL_DELAY` floor i `crawl-delay` z robots.txt se ignorují —
@@ -97,20 +127,21 @@ def crawl_site(start_url: str, max_pages: int = 500,
 
     is_local = is_local_url(start_url)
 
-    # Zjisti finální URL po přesměrování
-    try:
-        probe       = requests.get(start_url, timeout=10, allow_redirects=True,
-                                   headers={"User-Agent": UA})
-        base_netloc = urlparse(probe.url).netloc
-        start_url   = probe.url.split("#")[0].rstrip("/")
-    except Exception:
-        base_netloc = parsed.netloc
-
     session = requests.Session()
     session.headers.update({
         "User-Agent": UA,
         "Accept-Language": ACCEPT_LANGUAGE,
     })
+
+    # Zjisti finální URL po přesměrování. Jde přes stejnou Session jako
+    # crawl (stejné hlavičky vč. Accept-Language – web s jazykovou
+    # negociací by jinak mohl probe přesměrovat jinam než zbytek crawlu).
+    try:
+        probe       = session.get(start_url, timeout=timeout, allow_redirects=True)
+        base_netloc = urlparse(probe.url).netloc
+        start_url   = probe.url.split("#")[0].rstrip("/")
+    except Exception:
+        base_netloc = parsed.netloc
 
     # Robots.txt + crawl-delay
     if is_local:
@@ -120,17 +151,20 @@ def crawl_site(start_url: str, max_pages: int = 500,
         effective_delay = 0.0
     else:
         rp = RobotFileParser()
+        rp_delay = 0.0
         try:
             rp.set_url(f"{parsed.scheme}://{base_netloc}/robots.txt")
             rp.read()
             # Respektuj Crawl-delay z robots.txt pokud je nastavený
-            rp_delay = rp.crawl_delay(UA) or 0
-            effective_delay = max(delay, rp_delay, MIN_DELAY)
+            rp_delay = float(rp.crawl_delay(UA) or 0)
         except Exception:
-            effective_delay = max(delay, MIN_DELAY)
+            pass
+        effective_delay = max(delay, rp_delay, MIN_DELAY)
 
-        if effective_delay != delay:
-            gray(f"  (robots.txt nastavuje crawl-delay: {effective_delay}s)"); print()
+        # Hlášku o robots.txt jen když crawl-delay skutečně rozhodl –
+        # dřív se vypisovala i když pauzu zvedl jen náš MIN_DELAY floor.
+        if rp_delay > delay and rp_delay >= MIN_DELAY:
+            gray(f"  (robots.txt nastavuje crawl-delay: {rp_delay:g}s)"); print()
 
     # Připrav seed_set — URL z parametru seed_urls, které jsou už nalezené
     # jinou cestou (typicky sitemap). Tyto URL crawler stáhne a vytáhne z nich
@@ -140,20 +174,18 @@ def crawl_site(start_url: str, max_pages: int = 500,
         for seed in seed_urls:
             seed_set.add(_url_key(_normalize(seed)))
 
-    # Inicializace fronty: pokud máme seedy, použij je. Jinak start_url.
-    if seed_urls:
-        # Normalizujeme každý seed; deduplikujeme přes seen-key
-        initial = []
-        seen_init: set = set()
-        for s in seed_urls:
-            n = _normalize(s)
-            k = _url_key(n)
-            if k not in seen_init:
-                seen_init.add(k)
-                initial.append(n)
-        queue = deque(initial)
-    else:
-        queue = deque([_normalize(start_url)])
+    # Inicializace fronty: start_url je VŽDY první (i v seed režimu — sitemap
+    # homepage často neobsahuje a bez toho by se homepage vůbec neauditovala),
+    # pak seedy. Deduplikace přes url-key.
+    initial: list = []
+    seen_init: set = set()
+    for s in [start_url] + list(seed_urls or []):
+        n = _normalize(s)
+        k = _url_key(n)
+        if k not in seen_init:
+            seen_init.add(k)
+            initial.append(n)
+    queue = deque(initial)
 
     seen     = set()
     seen_lock = threading.Lock()
@@ -163,7 +195,7 @@ def crawl_site(start_url: str, max_pages: int = 500,
         """Stáhne dávku URL paralelně a vrátí nové linky."""
         new_links = []
         with ThreadPoolExecutor(max_workers=min(WORKERS, len(batch))) as ex:
-            futures = {ex.submit(_fetch, session, url): url for url in batch}
+            futures = {ex.submit(_fetch, session, url, timeout): url for url in batch}
             for future in as_completed(futures):
                 url, html = future.result()
                 if html is None:
@@ -211,7 +243,8 @@ def crawl_site(start_url: str, max_pages: int = 500,
                     continue
                 seen.add(key)
 
-            if _ignore(url) or not _same_domain(base_netloc, url):
+            if (_ignore(url) or not _same_domain(base_netloc, url)
+                    or is_excluded(url, exclude)):
                 continue
             # robots.txt check — jen pro veřejné weby; lokální host vynecháváme
             if rp is not None:

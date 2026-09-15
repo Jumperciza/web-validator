@@ -7,7 +7,7 @@ from urllib.parse import quote
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-from issues import Issue, IssueType
+from issues import Issue
 from robots_check import CRITICAL_PREFIX as ROBOTS_CRITICAL_PREFIX
 from stats  import compute_stats
 from ui     import is_local_url
@@ -149,6 +149,9 @@ def _write_summary(ws, row: int, score: int, stats, http_converted: bool = False
         ("Struktura – Problémy",  stats.struct_bad,
             O_BG if stats.struct_bad else G_BG, O_FT if stats.struct_bad else G_FT),
     ]
+    if stats.w3c_skipped:
+        cards.append(("W3C – Přeskočeno (validátor nedostupný)",
+                      stats.w3c_skipped, GR_BG, GR_FT))
     if stats.w3c_failed:
         cards.append(("Nepodařilo načíst stránek", stats.w3c_failed, R_BG, R_FT))
 
@@ -271,11 +274,21 @@ def _write_w3c_section(ws, row: int, results: list, is_local_audit: bool = False
     _title_row(ws, row, "W3C VALIDACE – STRÁNKY S PROBLÉMY", SUB); row += 1
 
     w3c_issues = [r for r in results
-                  if r["w3c_category"] not in ("ok", "validator_error")]
+                  if r["w3c_category"] not in ("ok", "validator_error", "skipped")]
     if not w3c_issues:
+        validated = [r for r in results
+                     if r["w3c_category"] not in ("validator_error", "skipped")]
         ws.merge_cells(f"A{row}:G{row}")
-        ws.cell(row=row, column=1, value="✓ Žádné W3C problémy nalezeny")
-        ws.cell(row=row, column=1).font = _bf(color=G_FT, bold=True)
+        if validated:
+            ws.cell(row=row, column=1, value="✓ Žádné W3C problémy nalezeny")
+            ws.cell(row=row, column=1).font = _bf(color=G_FT, bold=True)
+        else:
+            # Ani jedna stránka nebyla zvalidovaná (chybí vnu.jar / Java) —
+            # nesmíme tvrdit, že je vše v pořádku.
+            ws.cell(row=row, column=1,
+                    value="ℹ W3C validace neproběhla (vnu.jar / Java nedostupné)")
+            ws.cell(row=row, column=1).font = _bf(color=GR_FT)
+            ws.cell(row=row, column=1).fill = _fill(GR_BG)
         ws.row_dimensions[row].height = 20
         return row + 1
 
@@ -503,9 +516,14 @@ def _write_user_pages(ws, row: int, user_pages: list, is_local_audit: bool = Fal
     for p in user_pages:
         exists = p.get("exists", False)
         sc     = p.get("status_code", 0)
+        note   = p.get("note", "")
         if exists:
             bg_e, ft_e, badge = O_BG, O_FT, "EXISTUJE ⚠"
-        elif sc == 404 or sc == 0:
+        elif sc == 0:
+            # Síťová chyba – nevíme, jestli sekce je; nesmí to vypadat jako "OK"
+            bg_e, ft_e, badge = GR_BG, GR_FT, "Nedostupné (chyba spojení)"
+        elif sc == 404 or sc == 200:
+            # 200 bez exists = soft 404 / přesměrování pryč (viz note)
             bg_e, ft_e, badge = G_BG, G_FT, "Neexistuje"
         else:
             bg_e, ft_e, badge = GR_BG, GR_FT, f"HTTP {sc}"
@@ -516,19 +534,44 @@ def _write_user_pages(ws, row: int, user_pages: list, is_local_audit: bool = Fal
         ws.merge_cells(f"E{row}:F{row}")
         _dc(ws, row, 5, sc if sc else "–", align="center",
             bg=O_BG if exists else GR_BG)
-        ws.merge_cells(f"G{row}:G{row}")
         _badge(ws, row, 7, badge, bg_e, ft_e)
         ws.row_dimensions[row].height = 18; row += 1
+
+        if note:
+            ws.merge_cells(f"A{row}:G{row}")
+            ws.cell(row=row, column=1, value=f"   ↳ {note}")
+            ws.cell(row=row, column=1).font = _bf(color=GR_FT, sz=9)
+            ws.row_dimensions[row].height = 16; row += 1
 
     return row
 
 
 # ── Hlavní funkce ─────────────────────────────────────────────────────────────
 
+def _save_workbook(wb, output_path: Path) -> Path:
+    """
+    Uloží sešit. Pokud je cílový soubor zamčený (otevřený v Excelu /
+    LibreOffice → PermissionError), uloží ho místo toho vedle s časovou
+    značkou v názvu – výsledek celého auditu se nesmí ztratit kvůli
+    zapomenutému otevřenému oknu. Vrátí cestu, kam se report skutečně uložil.
+    """
+    try:
+        wb.save(output_path)
+        return output_path
+    except PermissionError:
+        stamp    = datetime.now().strftime("%Y%m%d_%H%M%S")
+        alt_path = output_path.with_name(f"{output_path.stem}_{stamp}{output_path.suffix}")
+        wb.save(alt_path)
+        return alt_path
+
+
 def write_report(results: list, output_path: Path, start_url: str,
                  score: int = -1, source_label: str = "",
-                 domain_info: dict | None = None) -> None:
-    """Generuje Excel report."""
+                 domain_info: dict | None = None) -> Path:
+    """
+    Generuje Excel report. Vrátí cestu k uloženému souboru – ta se může
+    lišit od `output_path`, pokud byl původní soubor zamčený (viz _save_workbook).
+    """
     if domain_info is None:
         domain_info = {}
 
@@ -569,4 +612,4 @@ def write_report(results: list, output_path: Path, start_url: str,
     row = _write_user_pages(ws, row, user_pages, is_local_audit=is_local_audit)
 
     ws.freeze_panes = "A4"
-    wb.save(output_path)
+    return _save_workbook(wb, output_path)

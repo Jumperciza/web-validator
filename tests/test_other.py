@@ -88,6 +88,56 @@ class TestStats(unittest.TestCase):
         self.assertEqual(s.score, 50)
         self.assertEqual(s.w3c_failed, 1)
 
+    def test_skipped_w3c_does_not_reduce_score(self):
+        """Chybí vnu.jar → 'skipped'. Stránka je v pořádku, skóre 100, ne 0."""
+        results = [
+            {"w3c_category": "skipped", "structure_issues": [],
+             "w3c_error_msg": "vnu.jar nenalezen"},
+        ]
+        s = compute_stats(results)
+        self.assertEqual(s.score, 100)
+        self.assertEqual(s.w3c_skipped, 1)
+        self.assertEqual(s.w3c_failed, 0)
+        self.assertEqual(s.struct_ok, 1)
+
+    def test_skipped_w3c_still_penalizes_structure(self):
+        results = [
+            {"w3c_category": "skipped",
+             "structure_issues": [Issue(type=IssueType.MISSING_H1)]},
+        ]
+        s = compute_stats(results)
+        self.assertEqual(s.score, 85)
+        self.assertEqual(s.struct_bad, 1)
+
+    def test_unreachable_page_not_counted_as_struct_ok(self):
+        """Nedostupná stránka nemá strukturu — nesmí zvyšovat 'Struktura OK'."""
+        results = [
+            {"w3c_category": "validator_error", "structure_issues": [],
+             "w3c_error_msg": "timeout"},
+        ]
+        s = compute_stats(results)
+        self.assertEqual(s.struct_ok, 0)
+        self.assertEqual(s.struct_bad, 0)
+        self.assertEqual(s.w3c_failed, 1)
+
+
+class TestValidatorSkipped(unittest.TestCase):
+    """validator_w3c.validate() bez jar musí vrátit 'skipped', ne 'validator_error'."""
+
+    def test_no_jar_returns_skipped(self):
+        import validator_w3c
+        with patch.object(validator_w3c, "vnu_jar", ""):
+            res = validator_w3c.validate(b"<html></html>", jar="")
+        self.assertEqual(res["category"], "skipped")
+        self.assertIn("vnu.jar", res["error_msg"])
+
+    @patch("validator_w3c.subprocess.run", side_effect=FileNotFoundError)
+    def test_missing_java_returns_skipped(self, _mock):
+        import validator_w3c
+        with patch.object(validator_w3c, "_server_port", 0):
+            res = validator_w3c.validate(b"<html></html>", jar="fake.jar")
+        self.assertEqual(res["category"], "skipped")
+
 
 # ── UI (URL validace) ────────────────────────────────────────────────────────
 
@@ -222,6 +272,87 @@ class TestHybridCrawl(unittest.TestCase):
         sig = inspect.signature(crawl_site)
         self.assertIn("seed_urls", sig.parameters)
         self.assertFalse(sig.parameters["seed_urls"].default)
+
+    def test_seed_mode_still_visits_start_url(self):
+        """Hybrid režim: start_url musí být ve frontě i když není mezi seedy."""
+        import crawler
+
+        fetched: list[str] = []
+
+        def _fake_fetch(session, url, timeout=None):
+            fetched.append(url)
+            return url, "<html><body><h1>x</h1></body></html>"
+
+        class _Probe:
+            url = "https://example.cz/"
+
+        with patch("crawler.requests.Session") as sess_cls, \
+             patch("crawler._fetch", side_effect=_fake_fetch), \
+             patch("crawler.RobotFileParser") as rp_cls, \
+             patch("crawler.time.sleep"):
+            sess_cls.return_value.get.return_value = _Probe()
+            rp_cls.return_value.crawl_delay.return_value = 0
+            rp_cls.return_value.can_fetch.return_value = True
+            found = crawler.crawl_site(
+                "https://example.cz/", max_pages=10, delay=0,
+                seed_urls=["https://example.cz/o-nas", "https://example.cz/kontakt"],
+            )
+
+        self.assertIn("https://example.cz", fetched)
+        # start_url není seed → vrací se jako nově nalezená stránka
+        self.assertIn("https://example.cz", found)
+        # seedy se stáhly (kvůli extrakci odkazů), ale do found nepatří
+        self.assertIn("https://example.cz/o-nas", fetched)
+        self.assertNotIn("https://example.cz/o-nas", found)
+
+
+class TestAuditRoot(unittest.TestCase):
+    def test_root_matches_variants(self):
+        from main import _is_audit_root
+        self.assertTrue(_is_audit_root("https://www.example.cz/", "https://example.cz"))
+        self.assertTrue(_is_audit_root("http://example.cz", "https://www.example.cz/"))
+        self.assertFalse(_is_audit_root("https://example.cz/o-nas", "https://example.cz/"))
+        self.assertFalse(_is_audit_root("https://example.cz/", ""))
+
+
+class TestSitemapSoft404(unittest.TestCase):
+    """HTML odpověď se statusem 200 nesmí zablokovat další sitemap kandidáty."""
+
+    def test_soft_404_falls_through_to_next_candidate(self):
+        import sitemap
+
+        html_404 = "<!DOCTYPE html><html><body><h1>404</h1></body></html>"
+        real_xml = (
+            '<?xml version="1.0"?>'
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            '<url><loc>https://example.cz/</loc></url>'
+            '<url><loc>https://example.cz/o-nas</loc></url>'
+            '</urlset>'
+        )
+
+        def _fake_fetch(url, session):
+            if url.endswith("/sitemap.xml"):
+                return html_404
+            if url.endswith("/sitemap_index.xml"):
+                return real_xml
+            return None
+
+        with patch("sitemap._sitemap_candidates",
+                   return_value=["https://example.cz/sitemap.xml",
+                                 "https://example.cz/sitemap_index.xml"]), \
+             patch("sitemap._fetch_text", side_effect=_fake_fetch):
+            urls = sitemap.fetch_sitemap_urls("https://example.cz/")
+
+        self.assertEqual(len(urls), 2)
+        self.assertIn("https://example.cz/o-nas", urls)
+
+    def test_html_response_does_not_print_parse_error(self):
+        from io import StringIO
+        html = "<!DOCTYPE html><html><body>nope</body></html>"
+        with patch("sys.stdout", new_callable=StringIO) as out:
+            pages, sitemaps = _parse_sitemap_xml(html)
+        self.assertEqual((pages, sitemaps), ([], []))
+        self.assertNotIn("parse chyba", out.getvalue())
 
 
 # ── Java version check ──────────────────────────────────────────────────────

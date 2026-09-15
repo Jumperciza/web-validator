@@ -26,6 +26,11 @@ class IssueType(Enum):
     MISSING_VIEWPORT  = "missing_viewport"
     NOINDEX           = "noindex"
     STAGING_URL       = "staging_url"
+    MISSING_TITLE     = "missing_title"       # <title> chybí nebo je prázdný
+    DUPLICATE_TITLE   = "duplicate_title"     # stejný <title> na více stránkách (celý web)
+    MISSING_CANONICAL = "missing_canonical"
+    CANONICAL_MISMATCH = "canonical_mismatch" # canonical míří jinam než na sebe
+    CANONICAL_HTTP    = "canonical_http"      # http:// canonical na https stránce
     OTHER             = "other"
 
 
@@ -46,6 +51,11 @@ ISSUE_LABELS = {
     IssueType.MISSING_VIEWPORT:  "Chybějící meta viewport",
     IssueType.NOINDEX:           "Stránka má noindex (nebude indexována Googlem)",
     IssueType.STAGING_URL:       "Odkaz na staging/dev doménu v HTML",
+    IssueType.MISSING_TITLE:     "Chybí nebo prázdný <title>",
+    IssueType.DUPLICATE_TITLE:   "Duplicitní <title> (stejný na více stránkách)",
+    IssueType.MISSING_CANONICAL: "Chybí <link rel=\"canonical\">",
+    IssueType.CANONICAL_MISMATCH: "Canonical míří na jinou URL než je stránka",
+    IssueType.CANONICAL_HTTP:    "Canonical používá http:// na https stránce",
     IssueType.OTHER:             "Ostatní problémy",
 }
 
@@ -77,6 +87,10 @@ class Issue:
         base = ISSUE_LABELS.get(self.type, str(self.type.value))
         if self.type == IssueType.EMPTY_TAG and self.tag:
             return f"{base} <{self.tag}>"
+        if self.type == IssueType.DUPLICATE_TITLE and self.detail:
+            # Excel seskupuje podle labelu → jeden řádek na každý duplicitní
+            # title, ne jeden společný řádek pro všechny duplicity.
+            return f'{base}: "{self.detail}"'
         return base
 
     @property

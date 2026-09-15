@@ -17,11 +17,13 @@ Struktura:
   vnu.jar            ← lokální W3C validátor
 """
 import argparse
+import codecs
 import ipaddress
 import re
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -37,7 +39,8 @@ from sitemap         import fetch_sitemap_urls
 from robots_check    import (check_robots_js_css, check_user_pages,
                              CRITICAL_PREFIX as ROBOTS_CRITICAL_PREFIX)
 import validator_w3c as w3c_mod
-from structure_check import check_structure, check_homepage_meta
+from structure_check import (check_structure, check_homepage_meta,
+                             extract_title, mark_duplicate_titles)
 from report_excel    import write_report
 from validator_w3c   import (find_vnu_jar, start_server, stop_server,
                              check_java_version)
@@ -48,12 +51,42 @@ from ui              import (prompt_url, print_banner, is_valid_url,
                              write, write_line)
 
 
+_META_CHARSET_RE = re.compile(
+    rb'<meta[^>]+charset\s*=\s*["\']?\s*([a-zA-Z0-9_.:-]+)', re.I)
+
+
+def _sniff_meta_charset(html_bytes: bytes) -> str | None:
+    """Vytáhne charset z <meta charset> / <meta http-equiv> v hlavičce dokumentu."""
+    m = _META_CHARSET_RE.search(html_bytes[:4096])
+    if not m:
+        return None
+    enc = m.group(1).decode("ascii", errors="ignore").strip().lower()
+    try:
+        codecs.lookup(enc)
+        return enc
+    except LookupError:
+        return None
+
+
 def fetch_html(session: requests.Session, url: str, timeout: int = FETCH_TIMEOUT):
-    """Stáhne HTML stránky přes sdílenou Session. Vrátí (bytes, text, ct) nebo (None, None, chyba)."""
+    """
+    Stáhne HTML stránky přes sdílenou Session.
+    Vrátí (bytes, text, content_type) nebo (None, None, chyba).
+
+    Kódování textu: pokud HTTP hlavička nenese charset, requests by pro
+    text/* podle RFC použil ISO-8859-1 a česká diakritika by se rozbila
+    (a struktura-check by pak hledal "vložte text" v mojibake). Proto
+    charset bereme z <meta charset> v dokumentu, a když ani ten není,
+    z autodetekce (`apparent_encoding`).
+    """
     try:
         resp = session.get(url, timeout=timeout)
         resp.raise_for_status()
-        return resp.content, resp.text, resp.headers.get("Content-Type", "text/html; charset=utf-8")
+        ct = resp.headers.get("Content-Type", "")
+        if "charset=" not in ct.lower():
+            resp.encoding = (_sniff_meta_charset(resp.content)
+                             or resp.apparent_encoding or "utf-8")
+        return resp.content, resp.text, ct or "text/html"
     except Exception as e:
         return None, None, str(e)
 
@@ -120,6 +153,14 @@ def _print_result(idx: int, total: int, url: str, w3c: dict,
     lines.append(("plain", "\n  -> "))
 
     cat = w3c["category"]
+    if cat == "validator_error":
+        # Stránku se nepodařilo stáhnout — nemá smysl tisknout W3C ani strukturu
+        # (dřív se tu ukazovalo "[STRUKTURA: OK]", což bylo zavádějící).
+        lines.append(("err", "[NEDOSTUPNÁ]"))
+        lines.append(("plain", f" {w3c.get('error_msg') or 'stránku se nepodařilo načíst'}\n"))
+        _emit_lines(lines)
+        return
+
     if cat == "ok":
         lines.append(("ok", "[W3C: OK]"))
     elif cat == "warning":
@@ -130,10 +171,14 @@ def _print_result(idx: int, total: int, url: str, w3c: dict,
         lines.append(("err", f"[W3C: VAROVÁNÍ {len(w3c['warnings'])} + CHYBA {len(w3c['errors'])}]"))
     else:
         lines.append(("gray", "[W3C: přeskočeno]"))
-        if w3c.get("error_msg"):
+        msg = w3c.get("error_msg")
+        # Stejný důvod (např. "vnu.jar nenalezen") vypíšeme jen jednou —
+        # u 500 stránek by to jinak byl spam.
+        if msg and msg not in _reported_skip_msgs:
+            _reported_skip_msgs.add(msg)
             lines.append(("plain", "\n  "))
             lines.append(("warn", "[!]"))
-            lines.append(("plain", f" {w3c['error_msg']}"))
+            lines.append(("plain", f" {msg}"))
 
     lines.append(("plain", "  "))
     if structure_issues:
@@ -141,14 +186,17 @@ def _print_result(idx: int, total: int, url: str, w3c: dict,
     else:
         lines.append(("ok", "[STRUKTURA: OK]"))
     lines.append(("plain", "\n"))
+    _emit_lines(lines)
 
-    _lock = getattr(_print_result, "_lock", None)
-    if _lock is None:
-        _print_result._lock = threading.Lock()
-        _lock = _print_result._lock
 
+_print_lock = threading.Lock()
+_reported_skip_msgs: set[str] = set()   # důvody přeskočení W3C už vypsané
+
+
+def _emit_lines(lines: list) -> None:
+    """Vypíše (kind, text) dvojice pod jedním zámkem — výstup z threadů se nemíchá."""
     fn_map = {"ok": ok, "warn": warn, "err": err, "gray": gray, "plain": lambda s: None}
-    with _lock:
+    with _print_lock:
         for kind, text in lines:
             if kind == "plain":
                 sys.stdout.write(text); sys.stdout.flush()
@@ -166,7 +214,7 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
     # Lokální host = bez throttlingu. Dev server na vlastním stroji
     # nepotřebujeme šetřit, audit běží řádově rychleji.
     is_local = is_local_url(start_url)
-    fetch_pause = 0.0 if is_local else (FETCH_DELAY / FETCH_WORKERS)
+    fetch_pause = 0.0 if is_local else FETCH_DELAY
 
     # Sdílená HTTP Session – keep-alive TCP spojení
     session = requests.Session()
@@ -179,10 +227,19 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
     html_data: dict = {}
 
     def _do_fetch(url):
-        return url, fetch_html(session, url)
+        result = fetch_html(session, url)
+        # Pauza běží UVNITŘ workeru — každý worker po svém requestu počká
+        # FETCH_DELAY, takže na server jde max FETCH_WORKERS requestů za
+        # (doba requestu + FETCH_DELAY). Dřív byl sleep v konzumní smyčce
+        # as_completed, což workery vůbec nebrzdilo (všechny URL byly
+        # submitnuté najednou) a throttling reálně neexistoval.
+        if fetch_pause > 0:
+            time.sleep(fetch_pause)
+        return url, result
 
     gray("  [1/3]"); print(" Stahuji stránky...")
-    with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as ex:
+    ex = ThreadPoolExecutor(max_workers=FETCH_WORKERS)
+    try:
         futures = {ex.submit(_do_fetch, url): url for url in pages}
         done = 0
         for future in as_completed(futures):
@@ -191,8 +248,12 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
             done += 1
             if done % FETCH_WORKERS == 0 or done == total:
                 write(f"\r  Staženo: {done}/{total}   ")
-            if fetch_pause > 0:
-                time.sleep(fetch_pause)
+    except KeyboardInterrupt:
+        # Ctrl+C: zahodíme frontu, jinak by `with`-blok čekal na dokončení
+        # všech už submitnutých úloh (u 500 stránek klidně minuty).
+        ex.shutdown(wait=False, cancel_futures=True)
+        raise
+    ex.shutdown(wait=True)
     print()
 
     # ── Krok 2: W3C + Struktura paralelně ────────────────────────────────────
@@ -207,7 +268,7 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
                 "url": url, "w3c_category": "validator_error",
                 "w3c_warnings": [], "w3c_errors": [],
                 "w3c_error_msg": content_type,
-                "structure_issues": [], "homepage_meta": [],
+                "structure_issues": [], "homepage_meta": [], "title": "",
             }
 
         w3c_res    = [None]
@@ -215,9 +276,11 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
 
         def _run_w3c():
             try:
-                w3c_res[0] = w3c_mod.validate(html_bytes, jar=jar_path)
+                w3c_res[0] = w3c_mod.validate(html_bytes, jar=jar_path,
+                                              content_type=content_type)
             except Exception as e:
-                w3c_res[0] = {"category": "validator_error", "warnings": [],
+                # Validátor spadl, ale stránka je stažená → "skipped", ne "validator_error"
+                w3c_res[0] = {"category": "skipped", "warnings": [],
                               "errors": [], "error_msg": str(e)}
 
         def _run_struct():
@@ -242,6 +305,13 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
         except Exception as e:
             homepage_meta = [f"Chyba při kontrole meta: {e}"]
 
+        # Title si ukládáme kvůli kontrole duplicit napříč webem (běží až
+        # po zpracování všech stránek – viz mark_duplicate_titles).
+        try:
+            title = extract_title(html_text)
+        except Exception:
+            title = ""
+
         return idx, {
             "url":              url,
             "w3c_category":     w3c_res[0]["category"],
@@ -250,9 +320,11 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
             "w3c_error_msg":    w3c_res[0]["error_msg"],
             "structure_issues": struct_res[0],   # list[Issue]
             "homepage_meta":    homepage_meta,
+            "title":            title,
         }
 
-    with ThreadPoolExecutor(max_workers=LOCAL_WORKERS) as ex:
+    ex = ThreadPoolExecutor(max_workers=LOCAL_WORKERS)
+    try:
         futures = {ex.submit(_do_validate, (i + 1, url)): i
                    for i, url in enumerate(pages)}
         for future in as_completed(futures):
@@ -261,15 +333,25 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
                 computed[idx] = result
             except Exception as e:
                 err(f"\n  [!] Neočekávaná chyba při validaci: {e}"); print()
+    except KeyboardInterrupt:
+        ex.shutdown(wait=False, cancel_futures=True)
+        raise
+    ex.shutdown(wait=True)
 
     # ── Krok 3: Tisk výsledků v pořadí ───────────────────────────────────────
     gray("  [3/3]"); print(" Sestavuji výsledky...\n")
-    results = []
-    for i in range(1, total + 1):
-        if i not in computed:
-            continue
-        r = computed[i]
-        results.append(r)
+    results = [computed[i] for i in range(1, total + 1) if i in computed]
+
+    # Kontrola napříč webem – musí proběhnout před tiskem, aby
+    # [STRUKTURA: N problémů] u každé stránky už duplicitní title zahrnoval.
+    n_dup_titles = mark_duplicate_titles(results)
+    if n_dup_titles:
+        noun = ("titulek" if n_dup_titles == 1
+                else "titulky" if n_dup_titles < 5 else "titulků")
+        warn(f"  [!] Duplicitní <title>: {n_dup_titles} {noun} "
+             f"se opakuje na více stránkách"); print("\n")
+
+    for i, r in enumerate(results, 1):
         _print_result(i, total, r["url"],
                       {"category":  r["w3c_category"],
                        "warnings":  r["w3c_warnings"],
@@ -319,7 +401,7 @@ def make_filename(url: str) -> str:
       - localhost zůstane localhost
     """
     parsed = urlparse(url)
-    host   = (parsed.hostname or parsed.netloc or "report").replace("www.", "")
+    host   = (parsed.hostname or parsed.netloc or "report").removeprefix("www.")
 
     # IP adresa? Zachováme všechny oktety převedením teček na podtržítka.
     try:
@@ -335,7 +417,71 @@ def make_filename(url: str) -> str:
     return f"{name}_validator.xlsx"
 
 
+def build_output_path(url: str, output: str | None = None, keep: bool = False,
+                      reports_dir: Path | None = None) -> Path:
+    """
+    Kam uložit report.
+
+    Výchozí: `excel reporty/<host>_validator.xlsx` a soubor se při každém
+    běhu PŘEPÍŠE. Report je snímek aktuálního stavu webu – při opakovaném
+    spouštění během oprav by se jinak hromadily desítky souborů, ze kterých
+    je aktuální vždy jen ten poslední. Kdo chce historii, má `--keep`
+    (zamčený soubor navíc řeší _save_workbook fallbackem s časovou značkou).
+
+    --output CESTA  → konkrétní soubor (končí na .xlsx), nebo adresář –
+                      v něm se použije výchozí jméno.
+    --keep          → do jména se přidá časová značka, starý report zůstane.
+    """
+    if reports_dir is None:
+        reports_dir = Path(__file__).resolve().parent / "excel reporty"
+    default_name = make_filename(url)
+
+    if output:
+        out = Path(output).expanduser()
+        if out.suffix.lower() == ".xlsx" and not out.is_dir():
+            path = out
+        else:
+            path = out / default_name
+    else:
+        path = reports_dir / default_name
+
+    if keep:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path  = path.with_name(f"{path.stem}_{stamp}{path.suffix}")
+    return path
+
+
+def parse_exclude_patterns(values: list | None) -> list[str]:
+    """
+    `--exclude` lze zadat opakovaně i s více vzory oddělenými čárkou:
+      --exclude "/blog/*" --exclude "/en/*"   ==   --exclude "/blog/*,/en/*"
+    """
+    patterns: list[str] = []
+    for value in values or []:
+        for pat in value.split(","):
+            pat = pat.strip()
+            if pat and pat not in patterns:
+                patterns.append(pat)
+    return patterns
+
+
+def _ensure_utf8_stdout() -> None:
+    """
+    Windows: při přesměrování výstupu (pipe, soubor, některé IDE terminály)
+    použije Python kódování konzole (cp1250) a znaky jako ✓ / → / … shodí
+    program s UnicodeEncodeError. V interaktivní konzoli je UTF-8 default,
+    takže se to projevilo jen "někdy" — typický neviditelný bug.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if (stream.encoding or "").lower().replace("-", "") != "utf8":
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def main():
+    _ensure_utf8_stdout()
     parser = argparse.ArgumentParser(description="Web Validator – W3C + HTML struktura")
     parser.add_argument("url", nargs="?", help="URL webu")
     parser.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES)
@@ -346,7 +492,22 @@ def main():
                         help="Žádné interaktivní dotazy ani ENTER na konci")
     parser.add_argument("--no-server", action="store_true",
                         help="Nepoužívat vnu.jar server mód (fallback na subprocess)")
+    parser.add_argument("--exclude", action="append", metavar="VZOR",
+                        help="Vynechat URL odpovídající glob vzoru, např. \"/blog/*\". "
+                             "Lze opakovat nebo oddělit čárkou.")
+    parser.add_argument("--output", metavar="CESTA",
+                        help="Kam uložit report: soubor .xlsx nebo adresář "
+                             "(výchozí: excel reporty/<host>_validator.xlsx)")
+    parser.add_argument("--keep", action="store_true",
+                        help="Nepřepisovat starý report – přidat do jména časovou značku")
+    parser.add_argument("--fail-under", type=int, metavar="N",
+                        help="Skončit s exit kódem 1, pokud je Web Quality Score < N "
+                             "(0–100). Pro CI / kontrolu před nasazením.")
     args = parser.parse_args()
+
+    if args.fail_under is not None and not 0 <= args.fail_under <= 100:
+        parser.error("--fail-under musí být v rozsahu 0–100")
+    exclude = parse_exclude_patterns(args.exclude)
 
     # ── Banner ───────────────────────────────────────────────────────────────
     print_banner()
@@ -433,10 +594,13 @@ def main():
     pages        : list[str] = []
     source_label : str       = ""
 
+    if exclude:
+        gray(f"  Vynechávám URL podle vzorů: {', '.join(exclude)}"); print()
+
     info("  [SITEMAP]"); print(" Hledám sitemap.xml...")
     sm_pages: list[str] = []
     try:
-        sm_pages = fetch_sitemap_urls(url, max_urls=args.max_pages)
+        sm_pages = fetch_sitemap_urls(url, max_urls=args.max_pages, exclude=exclude)
         if sm_pages and len(sm_pages) >= SITEMAP_MIN_PAGES:
             # Sitemap má dostatek URL — použijeme ji a crawler přeskočíme.
             ok("  [SITEMAP]"); print(f" Nalezeno {len(sm_pages)} URL – crawler přeskočen.")
@@ -459,7 +623,8 @@ def main():
             gray(f"  Spouštím crawler s {len(sm_pages)} URL ze sitemapy jako seed..."); print()
             try:
                 extra = crawl_site(url, max_pages=args.max_pages,
-                                   delay=args.delay, seed_urls=sm_pages)
+                                   delay=args.delay, seed_urls=sm_pages,
+                                   exclude=exclude)
                 pages = sm_pages + extra
                 source_label = (f"sitemap+crawler "
                                 f"({len(sm_pages)} ze sitemap, "
@@ -473,11 +638,18 @@ def main():
             # Klasický crawler — sitemap nebyla, jdeme od start_url.
             gray("  Spouštím crawler..."); print()
             try:
-                pages        = crawl_site(url, max_pages=args.max_pages, delay=args.delay)
+                pages        = crawl_site(url, max_pages=args.max_pages,
+                                          delay=args.delay, exclude=exclude)
                 source_label = f"crawler ({len(pages)} URL)"
             except Exception as e:
                 err(f"  [✗] Crawler selhal: {e}"); print()
                 pages = []
+
+    # Startovní URL (homepage) musí být v auditu vždy — sitemap ji často
+    # neobsahuje a bez ní by se nespustila kontrola meta title/description.
+    if pages and not any(_is_audit_root(p, url) for p in pages):
+        gray("  Startovní URL nebyla v seznamu stránek – přidávám ji na začátek."); print()
+        pages.insert(0, url)
 
     print()
 
@@ -486,7 +658,11 @@ def main():
         stop_server()
         if not args.no_interactive:
             input("Stiskni ENTER pro ukončení...")
-        return
+        # Audit neproběhl → exit 1, aby to CI (--fail-under) nebralo jako úspěch.
+        return 1
+
+    if exclude:
+        source_label += f", vynecháno: {', '.join(exclude)}"
 
     # ── Doménové kontroly ─────────────────────────────────────────────────────
     info("  [DOMAIN]"); print(" Kontroluji robots.txt a uživatelskou sekci...")
@@ -519,8 +695,18 @@ def main():
     elif user_found:
         warn("  [!] Nalezeny uživatelské stránky: ")
         print(", ".join(p["path"] for p in user_found))
+        for p in user_found:
+            if p.get("note"):
+                gray(f"      ({p['note']})"); print()
+    elif any(p.get("status_code", 0) == 0 for p in user_pages):
+        # Síťová chyba – nevíme; neukazovat zelenou fajfku
+        warn("  [!] /uzivatel/ nelze ověřit: ")
+        print("; ".join(p.get("note", "chyba spojení") for p in user_pages))
     else:
         ok("  [✓]"); print(" Žádná uživatelská sekce nenalezena")
+        for p in user_pages:
+            if p.get("note"):
+                gray(f"      ({p['note']})"); print()
     print()
 
     # ── Validace stránek ─────────────────────────────────────────────────────
@@ -537,14 +723,17 @@ def main():
     score_fn = _score_color_fn(stats.score)
 
     # ── Report ───────────────────────────────────────────────────────────────
-    reports_dir = Path(__file__).resolve().parent / "excel reporty"
-    reports_dir.mkdir(exist_ok=True)
-    output_path = reports_dir / make_filename(url)
+    output_path = build_output_path(url, output=args.output, keep=args.keep)
     try:
-        write_report(results, output_path, url,
-                     score=stats.score,
-                     source_label=source_label,
-                     domain_info=domain_info)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        saved_path = write_report(results, output_path, url,
+                                  score=stats.score,
+                                  source_label=source_label,
+                                  domain_info=domain_info)
+        if saved_path != output_path:
+            warn(f"  [!] Soubor {output_path.name} je otevřený v jiném programu – "
+                 f"report uložen jako {saved_path.name}"); print()
+        output_path = saved_path
     except Exception as e:
         err(f"  [✗] Chyba při generování Excel reportu: {e}"); print()
         import traceback; traceback.print_exc()
@@ -568,24 +757,46 @@ def main():
                stats.struct_ok)
     write_line("Struktura – Chyby  :", warn if stats.struct_bad else ok,
                stats.struct_bad)
+    if stats.w3c_skipped:
+        write_line("W3C – Přeskočeno   :", gray, stats.w3c_skipped)
     if stats.w3c_failed:
         write_line("Nepodařilo načíst  :", err, stats.w3c_failed)
 
     write(f"  Zdroj URL          : {source_label}\n")
-    write(f"  Uloženo do         : ")
+    write("  Uloženo do         : ")
     blue(str(output_path)); write("\n")
 
     elapsed = time.time() - _start_time
     mins, secs = divmod(int(elapsed), 60)
     time_str = f"{mins}m {secs}s" if mins else f"{secs}s"
-    write(f"  Celková doba       : ")
+    write("  Celková doba       : ")
     gray(time_str); write("\n")
+
+    # ── Práh pro CI (--fail-under) ────────────────────────────────────────────
+    exit_code = 0
+    if args.fail_under is not None:
+        info("-" * 62); print()
+        if stats.score < args.fail_under:
+            exit_code = 1
+            err(f"  [✗] Skóre {stats.score} je pod prahem {args.fail_under} "
+                f"→ exit kód 1"); print()
+        else:
+            ok(f"  [✓] Skóre {stats.score} splňuje práh {args.fail_under}"); print()
 
     info("=" * 62); print("\n")
 
     if not args.no_interactive:
         input("Stiskni ENTER pro ukončení...")
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        # Ctrl+C kdekoliv v průběhu: ukliď vnu.jar server a skonči tiše
+        # (bez tracebacku). Exit kód 130 = konvence "ukončeno SIGINT".
+        stop_server()
+        print()
+        warn("  [!] Přerušeno uživatelem (Ctrl+C)."); print()
+        sys.exit(130)
