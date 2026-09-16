@@ -631,6 +631,63 @@ class TestCanonical(unittest.TestCase):
             self.assertFalse(_has_issue(issues, IssueType.CANONICAL_MISMATCH), url)
 
 
+class TestOpenGraph(unittest.TestCase):
+    PAGE = "https://www.example.cz/o-nas/"
+
+    def _check(self, head_extra: str):
+        html = (f"<html lang='cs'><head><title>T</title>{head_extra}</head>"
+                "<body><h1>x</h1></body></html>")
+        return _get_issue(check_structure(html, page_url=self.PAGE), IssueType.MISSING_OG)
+
+    def test_all_missing(self):
+        issue = self._check("")
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue.items, ["chybí og:title", "chybí og:description", "chybí og:image"])
+        self.assertEqual(issue.count, 3)
+
+    def test_complete_is_ok(self):
+        issue = self._check('<meta property="og:title" content="A">'
+                            '<meta property="og:description" content="B">'
+                            '<meta property="og:image" content="https://example.cz/og.png">')
+        self.assertIsNone(issue)
+
+    def test_name_attribute_tolerated_and_empty_content_missing(self):
+        issue = self._check('<meta name="og:title" content="A">'
+                            '<meta property="og:description" content="  ">'
+                            '<meta property="og:image" content="//cdn.example.cz/og.png">')
+        self.assertEqual(issue.items, ["chybí og:description"])
+
+    def test_relative_og_image_reported(self):
+        issue = self._check('<meta property="og:title" content="A">'
+                            '<meta property="og:description" content="B">'
+                            '<meta property="og:image" content="/img/og.png">')
+        self.assertEqual(issue.items, ["og:image není absolutní URL: /img/og.png"])
+        self.assertIn("není absolutní", issue.detail)
+
+
+class TestImageDimensions(unittest.TestCase):
+    def _check(self, body: str):
+        html = f"<html lang='cs'><head><title>T</title></head><body><h1>x</h1>{body}</body></html>"
+        return _get_issue(check_structure(html, page_url="https://example.cz/"),
+                          IssueType.IMG_NO_DIMENSIONS)
+
+    def test_missing_dimensions_listed(self):
+        issue = self._check('<img src="/a.png" alt=""><img src="/b.png" width="10" alt="">'
+                            '<img alt="">')
+        self.assertEqual(issue.items, ["/a.png", "/b.png", "(bez src)"])
+        self.assertEqual(issue.count, 3)
+
+    def test_attributes_or_inline_style_ok(self):
+        issue = self._check('<img src="/a.png" width="10" height="5" alt="">'
+                            '<img src="/b.png" style="width: 10px; height:5px" alt="">')
+        self.assertIsNone(issue)
+
+    def test_style_with_only_width_is_reported(self):
+        issue = self._check('<img src="/a.png" style="width:100%" alt="">'
+                            '<img src="data:image/gif;base64,R0lGOD" alt="">')
+        self.assertEqual(issue.items, ["/a.png", "data:… (inline obrázek)"])
+
+
 class TestHomepageMeta(unittest.TestCase):
     def test_title_too_short(self):
         html = "<html><head><title>Krátký</title></head></html>"

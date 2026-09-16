@@ -19,9 +19,14 @@ Prováděné kontroly:
   13. URL ukazující na staging/dev domény (canonical, og:image, src, href...)
   14. <title> existuje a není prázdný (na každé stránce, ne jen na homepage)
   15. <link rel="canonical"> – existuje, míří sám na sebe, není http:// na https
+  16. Open Graph meta (og:title, og:description, og:image) pro sdílení na sítích
+  17. <img> bez width/height (prohlížeč nezná rozměry → posun layoutu, CLS)
 
 Napříč webem (po zpracování všech stránek, viz `mark_duplicate_titles`):
-  16. Duplicitní <title> na více stránkách
+  18. Duplicitní <title> na více stránkách
+
+Dostupnost odkazů a obrázků (404, velikost) řeší links_check.py – potřebuje
+síťové requesty, proto neběží tady.
 
 Pro lokální / privátní hosty (localhost, 127.0.0.1, *.local…) se přeskočí
 kontroly které pro lokální vývoj nedávají smysl: HTTP odkazy, noindex,
@@ -506,7 +511,70 @@ def check_structure(html: str, page_url: str = "") -> List[Issue]:
                     items=[href], count=1,
                 ))
 
+    # 16. Open Graph — bez og:title/og:description/og:image ukáže Facebook,
+    # LinkedIn i Messenger při sdílení jen holou URL bez náhledu. Kontrolujeme
+    # existenci a neprázdnost; og:image navíc musí být absolutní URL
+    # (relativní cestu sítě nerozvinou). Dostupnost obrázku ověřuje links_check.
+    og_missing = [name for name in _OG_REQUIRED if not _og_content(soup, name)]
+    og_detail = ""
+    og_image = _og_content(soup, "og:image")
+    if og_image and not og_image.lower().startswith(("http://", "https://", "//")):
+        og_detail = f"og:image není absolutní URL: {og_image[:80]}"
+    if og_missing or og_detail:
+        issues.append(Issue(
+            type=IssueType.MISSING_OG,
+            items=[f"chybí {name}" for name in og_missing]
+                  + ([og_detail] if og_detail else []),
+            count=len(og_missing) + (1 if og_detail else 0),
+            detail=og_detail,
+        ))
+
+    # 17. <img> bez width/height — prohlížeč nezná poměr stran, dokud obrázek
+    # nestáhne, a obsah pod ním "poskočí" (Cumulative Layout Shift).
+    # Stačí atributy width+height, nebo obojí v inline style.
+    no_dims: list[str] = []
+    for img in soup.find_all("img"):
+        if _img_has_dimensions(img):
+            continue
+        src = (img.get("src") or img.get("data-src") or "").strip()
+        if src.lower().startswith("data:"):
+            src = "data:… (inline obrázek)"
+        display = src[:80] + "…" if len(src) > 80 else src or "(bez src)"
+        no_dims.append(display)
+    if no_dims:
+        issues.append(Issue(
+            type=IssueType.IMG_NO_DIMENSIONS,
+            items=no_dims[:50],
+            count=len(no_dims),
+        ))
+
     return issues
+
+
+_OG_REQUIRED = ("og:title", "og:description", "og:image")
+_STYLE_WIDTH_RE  = re.compile(r"(^|[;\s])width\s*:", re.I)
+_STYLE_HEIGHT_RE = re.compile(r"(^|[;\s])height\s*:", re.I)
+
+
+def _og_content(soup: BeautifulSoup, name: str) -> str:
+    """
+    Obsah <meta property="og:…"> (správně) nebo <meta name="og:…"> (častá
+    chyba, sítě ji většinou tolerují). Vrací "" pokud tag chybí nebo je prázdný.
+    """
+    pattern = re.compile(rf"^{re.escape(name)}$", re.I)
+    for attr in ("property", "name"):
+        meta = soup.find("meta", attrs={attr: pattern})
+        if meta is not None and (meta.get("content") or "").strip():
+            return meta["content"].strip()
+    return ""
+
+
+def _img_has_dimensions(img) -> bool:
+    """True pokud má <img> width i height (atributy, nebo obojí v inline style)."""
+    if (img.get("width") or "").strip() and (img.get("height") or "").strip():
+        return True
+    style = img.get("style") or ""
+    return bool(_STYLE_WIDTH_RE.search(style) and _STYLE_HEIGHT_RE.search(style))
 
 
 def mark_duplicate_titles(results: list) -> int:

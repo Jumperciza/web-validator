@@ -12,7 +12,9 @@ Struktura:
   validator_w3c.py   ← W3C validace (server mód + subprocess fallback)
   structure_check.py ← kontrola HTML struktury
   robots_check.py    ← kontrola robots.txt + /uzivatel/
+  links_check.py     ← dostupnost odkazů a obrázků (404, velikost)
   report_excel.py    ← generování Excel reportu
+  report_json.py     ← JSON výstup + porovnání s minulým během
   updater.py         ← kontrola verze vnu.jar z GitHubu
   vnu.jar            ← lokální W3C validátor
 """
@@ -33,7 +35,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from colors          import ok, warn, err, info, gray, blue, pocet_problemu
 from config          import (USER_AGENT, ACCEPT_LANGUAGE, FETCH_TIMEOUT,
                              FETCH_WORKERS, LOCAL_WORKERS, FETCH_DELAY,
-                             DEFAULT_MAX_PAGES, SITEMAP_MIN_PAGES)
+                             DEFAULT_MAX_PAGES, SITEMAP_MIN_PAGES, IMAGE_MAX_KB,
+                             LINK_CHECK_MAX_TARGETS, LINK_CHECK_MAX_SECONDS)
 from crawler         import crawl_site
 from sitemap         import fetch_sitemap_urls
 from robots_check    import (check_robots_js_css, check_user_pages,
@@ -41,7 +44,11 @@ from robots_check    import (check_robots_js_css, check_user_pages,
 import validator_w3c as w3c_mod
 from structure_check import (check_structure, check_homepage_meta,
                              extract_title, mark_duplicate_titles)
+from links_check     import extract_refs, check_resources
 from report_excel    import write_report
+from report_json     import (build_json, write_json, build_json_path,
+                             find_previous_json, load_previous, compare_runs,
+                             format_previous_date)
 from validator_w3c   import (find_vnu_jar, start_server, stop_server,
                              check_java_version)
 from updater         import check_and_update, download_vnu_jar
@@ -205,6 +212,16 @@ def _emit_lines(lines: list) -> None:
         sys.stdout.flush()
 
 
+# Doba jednotlivých fází (název → sekundy) – vypisuje se v závěrečném
+# souhrnu, aby bylo hned vidět, kde běh trávil čas.
+PHASE_TIMES: dict[str, float] = {}
+
+
+def _fmt_duration(seconds: float) -> str:
+    mins, secs = divmod(int(seconds), 60)
+    return f"{mins}m {secs}s" if mins else f"{secs}s"
+
+
 def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -238,6 +255,7 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
         return url, result
 
     gray("  [1/3]"); print(" Stahuji stránky...")
+    t_fetch = time.time()
     ex = ThreadPoolExecutor(max_workers=FETCH_WORKERS)
     try:
         futures = {ex.submit(_do_fetch, url): url for url in pages}
@@ -257,7 +275,9 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
     print()
 
     # ── Krok 2: W3C + Struktura paralelně ────────────────────────────────────
+    PHASE_TIMES["stažení"] = time.time() - t_fetch
     gray("  [2/3]"); print(" Validuji a kontroluji strukturu...\n")
+    t_valid = time.time()
 
     def _do_validate(args: tuple) -> tuple:
         idx, url = args
@@ -269,6 +289,7 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
                 "w3c_warnings": [], "w3c_errors": [],
                 "w3c_error_msg": content_type,
                 "structure_issues": [], "homepage_meta": [], "title": "",
+                "refs": {},
             }
 
         w3c_res    = [None]
@@ -312,6 +333,13 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
         except Exception:
             title = ""
 
+        # Odkazy a obrázky na stránce – ověřuje je až fáze [LINKS]
+        # (links_check.check_resources), tady je jen sbíráme.
+        try:
+            refs = extract_refs(html_text, url)
+        except Exception:
+            refs = {}
+
         return idx, {
             "url":              url,
             "w3c_category":     w3c_res[0]["category"],
@@ -321,6 +349,7 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
             "structure_issues": struct_res[0],   # list[Issue]
             "homepage_meta":    homepage_meta,
             "title":            title,
+            "refs":             refs,
         }
 
     ex = ThreadPoolExecutor(max_workers=LOCAL_WORKERS)
@@ -339,6 +368,7 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
     ex.shutdown(wait=True)
 
     # ── Krok 3: Tisk výsledků v pořadí ───────────────────────────────────────
+    PHASE_TIMES["validace"] = time.time() - t_valid
     gray("  [3/3]"); print(" Sestavuji výsledky...\n")
     results = [computed[i] for i in range(1, total + 1) if i in computed]
 
@@ -360,6 +390,74 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
                       r["structure_issues"])
 
     return results
+
+
+def run_link_checks(results: list, url: str, check_external: bool = False) -> dict:
+    """
+    Fáze [LINKS]: ověří dostupnost interních odkazů a obrázků (HEAD),
+    postiženým stránkám přidá Issue (viz links_check) a vypíše souhrn.
+    Vrací link_report pro Excel a JSON.
+    """
+    info("  [LINKS]")
+    print(" Ověřuji odkazy a obrázky"
+          + (" (včetně externích)..." if check_external else "..."))
+
+    def _progress(done: int, total: int) -> None:
+        if done % 10 == 0 or done == total:
+            write(f"\r  Ověřeno: {done}/{total}   ")
+
+    report = check_resources(results, url, check_external=check_external,
+                             on_progress=_progress)
+    PHASE_TIMES["odkazy"] = report.get("elapsed", 0.0)
+    if report["checked_links"] + report["checked_images"]:
+        print()
+
+    if report.get("aborted"):
+        warn(f"  [!] Kontrola odkazů přerušena: {report['aborted']}."); print()
+        gray("      Neověřené cíle se nehlásí jako chyba – skóre není ovlivněné."); print()
+
+    broken = report["broken_links"]
+    images = report["images"]
+    n_checked = report["checked_links"] + report["known_ok"]
+    if broken:
+        n_pages = len({src for b in broken for src in b["sources"]})
+        warn(f"  [!] Nefunkční odkazy: {len(broken)} "
+             f"(na {n_pages} {'stránce' if n_pages == 1 else 'stránkách'})"); print()
+        for b in broken[:5]:
+            st = f"HTTP {b['status']}" if b["status"] else "nedostupné"
+            gray(f"      {st}  {b['url']}"); print()
+        if len(broken) > 5:
+            gray(f"      … a dalších {len(broken) - 5} (viz report)"); print()
+    else:
+        ok("  [✓]"); print(f" Odkazy fungují ({n_checked} ověřeno)")
+
+    n_img_broken = sum(1 for im in images if im["problem"] == "broken")
+    n_img_large  = len(images) - n_img_broken
+    if images:
+        parts = []
+        if n_img_broken: parts.append(f"{n_img_broken} nedostupných")
+        if n_img_large:  parts.append(f"{n_img_large} nad {IMAGE_MAX_KB} kB")
+        warn(f"  [!] Obrázky: {', '.join(parts)}"); print()
+    else:
+        ok("  [✓]"); print(f" Obrázky v pořádku ({report['checked_images']} ověřeno)")
+
+    if report["skipped_external"]:
+        gray(f"  ({report['skipped_external']} externích cílů neověřeno – "
+             f"zapni --check-external)"); print()
+    if report.get("collapsed_query"):
+        gray(f"  ({report['collapsed_query']} URL s parametry (filtry, ?v=…) "
+             f"sloučeno na základní stránku)"); print()
+    if report.get("skipped_limit"):
+        gray(f"  ({report['skipped_limit']} cílů nad limit {LINK_CHECK_MAX_TARGETS} "
+             f"neověřeno – ověřeny ty s nejvíc výskyty)"); print()
+    if report.get("skipped_time"):
+        gray(f"  ({report['skipped_time']} cílů neověřeno – vyčerpán časový limit "
+             f"{_fmt_duration(LINK_CHECK_MAX_SECONDS)})"); print()
+    if report.get("unverified"):
+        gray(f"  ({report['unverified']} cílů neověřeno kvůli síťové chybě – "
+             f"nehlásí se jako chyba)"); print()
+    print()
+    return report
 
 
 def run_domain_checks(url: str) -> dict:
@@ -503,6 +601,12 @@ def main():
     parser.add_argument("--fail-under", type=int, metavar="N",
                         help="Skončit s exit kódem 1, pokud je Web Quality Score < N "
                              "(0–100). Pro CI / kontrolu před nasazením.")
+    parser.add_argument("--check-external", action="store_true",
+                        help="Ověřit i odkazy a obrázky na cizích doménách "
+                             "(výchozí: jen interní – rychlejší)")
+    parser.add_argument("--json", metavar="CESTA",
+                        help="Kam uložit JSON výsledek: soubor .json nebo adresář "
+                             "(výchozí: vedle Excel reportu, <host>_validator.json)")
     args = parser.parse_args()
 
     if args.fail_under is not None and not 0 <= args.fail_under <= 100:
@@ -718,18 +822,41 @@ def main():
     # Server už není potřeba — ukončíme ho
     stop_server()
 
+    # ── Odkazy a obrázky (404, velikost) ─────────────────────────────────────
+    # Přidává Issue do výsledků → musí běžet PŘED výpočtem skóre.
+    link_report = None
+    try:
+        link_report = run_link_checks(results, url, check_external=args.check_external)
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:
+        err(f"  [!] Kontrola odkazů selhala: {e}"); print()
+
     # ── Statistiky ────────────────────────────────────────────────────────────
     stats    = compute_stats(results)
     score_fn = _score_color_fn(stats.score)
 
-    # ── Report ───────────────────────────────────────────────────────────────
+    # ── Porovnání s minulým během (JSON vedle reportu) ───────────────────────
     output_path = build_output_path(url, output=args.output, keep=args.keep)
+    json_path   = build_json_path(output_path, args.json)
+    comparison  = None
+    try:
+        previous = load_previous(find_previous_json(json_path))
+        if previous:
+            comparison = compare_runs(previous,
+                                      build_json(results, url, link_report=link_report))
+    except Exception as e:
+        gray(f"  (porovnání s minulým během se nepodařilo: {e})"); print()
+
+    # ── Report ───────────────────────────────────────────────────────────────
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         saved_path = write_report(results, output_path, url,
                                   score=stats.score,
                                   source_label=source_label,
-                                  domain_info=domain_info)
+                                  domain_info=domain_info,
+                                  link_report=link_report,
+                                  comparison=comparison)
         if saved_path != output_path:
             warn(f"  [!] Soubor {output_path.name} je otevřený v jiném programu – "
                  f"report uložen jako {saved_path.name}"); print()
@@ -737,6 +864,17 @@ def main():
     except Exception as e:
         err(f"  [✗] Chyba při generování Excel reportu: {e}"); print()
         import traceback; traceback.print_exc()
+
+    # JSON se zapisuje vždy – je to zdroj pro příští porovnání.
+    try:
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path = write_json(build_json(results, url, source_label=source_label,
+                                          domain_info=domain_info,
+                                          link_report=link_report,
+                                          comparison=comparison), json_path)
+    except Exception as e:
+        err(f"  [✗] Chyba při ukládání JSON: {e}"); print()
+        json_path = None
 
     # ── Souhrn ───────────────────────────────────────────────────────────────
     print()
@@ -762,15 +900,30 @@ def main():
     if stats.w3c_failed:
         write_line("Nepodařilo načíst  :", err, stats.w3c_failed)
 
+    if comparison:
+        d = comparison["delta"]
+        arrow = f"+{d}" if d > 0 else str(d) if d < 0 else "±0"
+        write("  Změna od minula    : ")
+        (_score_color_fn(100 if d > 0 else 0 if d < 0 else 70))(
+            f"{comparison['previous_score']} → {comparison['score']} ({arrow})")
+        write(f"  |  opraveno {comparison['fixed_count']}, "
+              f"nové {comparison['new_count']}  "
+              f"(minulý běh {format_previous_date(comparison['previous_date'])})\n")
+
     write(f"  Zdroj URL          : {source_label}\n")
     write("  Uloženo do         : ")
     blue(str(output_path)); write("\n")
+    if json_path:
+        write("  JSON               : ")
+        blue(str(json_path)); write("\n")
 
     elapsed = time.time() - _start_time
-    mins, secs = divmod(int(elapsed), 60)
-    time_str = f"{mins}m {secs}s" if mins else f"{secs}s"
     write("  Celková doba       : ")
-    gray(time_str); write("\n")
+    gray(_fmt_duration(elapsed)); write("\n")
+    if PHASE_TIMES:
+        write("  Doba fází          : ")
+        gray("  |  ".join(f"{name} {_fmt_duration(t)}" for name, t in PHASE_TIMES.items()))
+        write("\n")
 
     # ── Práh pro CI (--fail-under) ────────────────────────────────────────────
     exit_code = 0

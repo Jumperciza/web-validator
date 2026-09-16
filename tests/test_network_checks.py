@@ -479,9 +479,12 @@ class TestExitCode(unittest.TestCase):
                           return_value={"robots_issues": [], "robots_skipped": False,
                                         "user_pages": []}), \
              patch.object(m, "validate_pages", return_value=score_results), \
+             patch.object(m, "run_link_checks", return_value=None), \
              patch.object(m, "stop_server"), \
              patch("sys.stdout", new_callable=StringIO) as out:
             code = m.main()
+            self._json_files = sorted(Path(d).glob("*.json"))
+            self._xlsx_files = sorted(Path(d).glob("*.xlsx"))
         return code, out.getvalue()
 
     @staticmethod
@@ -511,6 +514,14 @@ class TestExitCode(unittest.TestCase):
         code, out = self._run(["https://example.cz"], [], pages=())
         self.assertEqual(code, 1)
         self.assertIn("Žádné stránky", out)
+
+    def test_json_written_next_to_excel(self):
+        """JSON se zapisuje vždy (zdroj pro příští porovnání), bez přepínače."""
+        _, out = self._run(["https://example.cz"], [self._page()])
+        self.assertEqual([p.name for p in self._json_files], ["example_validator.json"])
+        self.assertEqual([p.name for p in self._xlsx_files], ["example_validator.xlsx"])
+        self.assertIn("JSON               :", out)
+        self.assertNotIn("Změna od minula", out)
 
     def test_invalid_threshold_is_usage_error(self):
         import main as m
