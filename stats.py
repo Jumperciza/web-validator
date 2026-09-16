@@ -51,6 +51,7 @@ _BINARY_PENALTIES: dict[IssueType, float] = {
 
     # Menší
     IssueType.MISSING_CANONICAL:   3,   # doporučení, ne povinnost – nízká váha
+    IssueType.MISSING_OG:          3,   # sdílení na sociálních sítích bez náhledu
 }
 
 # Penalizace za problémy které se kumulují s počtem výskytů.
@@ -58,11 +59,15 @@ _BINARY_PENALTIES: dict[IssueType, float] = {
 # Cap brání tomu aby jeden typ problému sám sestřelil skóre do 0.
 _COUNTED_PENALTIES: dict[IssueType, tuple[float, float]] = {
     IssueType.STAGING_URL:   (8.0, 20),   # leftover dev/staging URL = SEO problém
+    IssueType.BROKEN_LINK:   (3.0, 15),   # 404 uvnitř webu = špatné UX i crawl budget
     IssueType.DUPLICATE_ID:  (3.0, 15),
+    IssueType.IMG_BROKEN:    (2.0, 10),
+    IssueType.IMG_TOO_LARGE: (2.0, 10),
     IssueType.HTTP_LINK:     (2.0, 15),
     IssueType.MISSING_ALT:   (1.5, 15),
     IssueType.EMPTY_TAG:     (0.5,  8),
     IssueType.EXTERNAL_LINK: (0.5,  6),
+    IssueType.IMG_NO_DIMENSIONS: (0.5, 5),
 }
 
 # W3C chyby — 2 body za každou, ale max −20 na stránku
@@ -86,12 +91,12 @@ class Stats:
     w3c_skipped: int = 0 # W3C validace neproběhla (skipped – chybí vnu.jar/Java)
     struct_ok:  int = 0  # stránky bez strukturálních problémů (jen načtené)
     struct_bad: int = 0
-    score:      int = 0  # 0–100 (váhové skóre, viz _page_score)
+    score:      int = 0  # 0–100 (váhové skóre, viz page_score)
 
 
 # ── Interní výpočet skóre ────────────────────────────────────────────────────
 
-def _page_score(result: dict) -> float:
+def page_score(result: dict) -> float:
     """
     Spočítá kvalitní skóre jedné stránky (0–100).
 
@@ -138,7 +143,7 @@ def compute_stats(results: list) -> Stats:
     Jeden zdroj pravdy pro statistiky — používá main.py i report_excel.py.
 
     Počty (w3c_ok, w3c_err, struct_ok, …) zůstávají zachované pro přehled
-    v souhrnu. Skóre se ale počítá váhově — viz _page_score.
+    v souhrnu. Skóre se ale počítá váhově — viz page_score.
     """
     s = Stats(total=len(results))
     if not results:
@@ -170,7 +175,7 @@ def compute_stats(results: list) -> Stats:
             s.struct_ok += 1
 
         # Per-page skóre — váhové
-        page_scores.append(_page_score(r))
+        page_scores.append(page_score(r))
 
     # Celkové skóre = průměr skóre všech stránek
     avg = sum(page_scores) / len(page_scores) if page_scores else 0.0

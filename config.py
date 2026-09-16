@@ -26,6 +26,14 @@ DEFAULT_MAX_PAGES = 500
 SITEMAP_MAX_DEPTH = 3    # max hloubka sitemap index rekurze
 SITEMAP_MIN_PAGES = 10   # pokud sitemap najde méně URL než tohle, doplní se crawlerem
 
+# ── Odkazy a obrázky (links_check.py) ────────────────────────────────────────
+IMAGE_MAX_KB    = 500  # obrázek větší než tohle se hlásí jako "příliš velký"
+LINK_CHECK_DELAY = 0.2 # pauza po každém HEAD requestu v jednom workeru (s)
+# Ochrana proti obřím webům (e-shopy s filtry = tisíce URL s parametry):
+LINK_CHECK_MAX_TARGETS = 1500  # max ověřovaných cílů (přednost mají ty s nejvíc výskyty)
+LINK_CHECK_MAX_SECONDS = 600   # časový rozpočet fáze [LINKS]; zbytek se označí jako neověřený
+LINK_CHECK_ABORT_AFTER = 15    # tolik síťových chyb za sebou = výpadek sítě → fáze se přeruší
+
 # ── Prahy pro meta tagy ──────────────────────────────────────────────────────
 META_TITLE_MIN = 30
 META_TITLE_MAX = 60

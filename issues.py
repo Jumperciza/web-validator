@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List
 
+from config import IMAGE_MAX_KB
+
 
 class IssueType(Enum):
     """Kategorie HTML strukturálních problémů."""
@@ -31,6 +33,11 @@ class IssueType(Enum):
     MISSING_CANONICAL = "missing_canonical"
     CANONICAL_MISMATCH = "canonical_mismatch" # canonical míří jinam než na sebe
     CANONICAL_HTTP    = "canonical_http"      # http:// canonical na https stránce
+    MISSING_OG        = "missing_og"          # chybí og:title / og:description / og:image
+    IMG_NO_DIMENSIONS = "img_no_dimensions"   # <img> bez width/height → CLS
+    BROKEN_LINK       = "broken_link"         # interní odkaz vrací 404 / je nedostupný
+    IMG_BROKEN        = "img_broken"          # obrázek vrací 404 / je nedostupný
+    IMG_TOO_LARGE     = "img_too_large"       # obrázek nad IMAGE_MAX_KB
     OTHER             = "other"
 
 
@@ -56,6 +63,11 @@ ISSUE_LABELS = {
     IssueType.MISSING_CANONICAL: "Chybí <link rel=\"canonical\">",
     IssueType.CANONICAL_MISMATCH: "Canonical míří na jinou URL než je stránka",
     IssueType.CANONICAL_HTTP:    "Canonical používá http:// na https stránce",
+    IssueType.MISSING_OG:        "Chybí Open Graph meta (og:title / og:description / og:image)",
+    IssueType.IMG_NO_DIMENSIONS: "Obrázky bez width/height (posun layoutu – CLS)",
+    IssueType.BROKEN_LINK:       "Nefunkční odkazy (404 / nedostupné)",
+    IssueType.IMG_BROKEN:        "Nedostupné obrázky (404)",
+    IssueType.IMG_TOO_LARGE:     f"Příliš velké obrázky (nad {IMAGE_MAX_KB} kB)",
     IssueType.OTHER:             "Ostatní problémy",
 }
 

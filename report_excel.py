@@ -1,4 +1,4 @@
-"""Excel report – jeden list s přehledem, W3C, strukturou, robots.txt, uživatelskou sekcí."""
+"""Excel report – jeden list s přehledem, W3C, strukturou, odkazy/obrázky, robots.txt, uživatelskou sekcí."""
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -7,7 +7,9 @@ from urllib.parse import quote
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
+from config import IMAGE_MAX_KB, LINK_CHECK_MAX_TARGETS
 from issues import Issue
+from report_json import format_previous_date
 from robots_check import CRITICAL_PREFIX as ROBOTS_CRITICAL_PREFIX
 from stats  import compute_stats
 from ui     import is_local_url
@@ -122,7 +124,8 @@ def _write_header(ws, start_url: str, source_label: str) -> int:
     return 4
 
 
-def _write_summary(ws, row: int, score: int, stats, http_converted: bool = False) -> int:
+def _write_summary(ws, row: int, score: int, stats, http_converted: bool = False,
+                   comparison: dict | None = None) -> int:
     _title_row(ws, row, "SOUHRN", SUB); row += 1
 
     if score >= 0:
@@ -137,6 +140,23 @@ def _write_summary(ws, row: int, score: int, stats, http_converted: bool = False
         vc.font = Font(name="Arial", bold=True, size=14, color=sc_ft)
         vc.fill = _fill(sc_bg); vc.alignment = _al("center"); vc.border = _brd()
         ws.row_dimensions[row].height = 32; row += 1
+
+    # Porovnání s minulým během (je-li vedle reportu JSON z minula)
+    if comparison:
+        delta = comparison.get("delta", 0)
+        if delta > 0:   c_bg, c_ft, arrow = G_BG, G_FT, f"+{delta}"
+        elif delta < 0: c_bg, c_ft, arrow = R_BG, R_FT, str(delta)
+        else:           c_bg, c_ft, arrow = GR_BG, GR_FT, "±0"
+        ws.merge_cells(f"A{row}:E{row}")
+        lc = ws.cell(row=row, column=1,
+                     value=f"Změna od minulého běhu ({format_previous_date(comparison.get('previous_date', ''))})")
+        lc.font = _bf(bold=True, sz=11); lc.alignment = _al(); lc.border = _brd()
+        ws.merge_cells(f"F{row}:G{row}")
+        vc = ws.cell(row=row, column=6,
+                     value=f"{comparison.get('previous_score', 0)} → {comparison.get('score', 0)}  ({arrow})")
+        vc.font = Font(name="Arial", bold=True, size=12, color=c_ft)
+        vc.fill = _fill(c_bg); vc.alignment = _al("center"); vc.border = _brd()
+        ws.row_dimensions[row].height = 24; row += 1
 
     cards = [
         ("Zkontrolováno stránek", stats.total,     B_BG, B_FT),
@@ -154,6 +174,13 @@ def _write_summary(ws, row: int, score: int, stats, http_converted: bool = False
                       stats.w3c_skipped, GR_BG, GR_FT))
     if stats.w3c_failed:
         cards.append(("Nepodařilo načíst stránek", stats.w3c_failed, R_BG, R_FT))
+    if comparison:
+        n_fixed = comparison.get("fixed_count", 0)
+        n_new   = comparison.get("new_count", 0)
+        cards.append(("Opraveno od minula (problémů)", n_fixed,
+                      G_BG if n_fixed else GR_BG, G_FT if n_fixed else GR_FT))
+        cards.append(("Nové problémy od minula", n_new,
+                      R_BG if n_new else G_BG, R_FT if n_new else G_FT))
 
     for label, val, bg, ft in cards:
         ws.merge_cells(f"A{row}:E{row}")
@@ -440,6 +467,174 @@ def _write_failed_pages(ws, row: int, results: list) -> int:
     return row
 
 
+def _sources_cell(urls: list[str], limit: int = 20) -> str:
+    """Seznam stránek do jedné buňky, při velkém počtu oříznutý."""
+    shown = [_as_https(u) for u in urls[:limit]]
+    if len(urls) > limit:
+        shown.append(f"… a dalších {len(urls) - limit}")
+    return "\n".join(shown)
+
+
+def _write_links_section(ws, row: int, link_report: dict | None) -> int:
+    """Nefunkční odkazy: cíl → status → stránky, kde odkaz je."""
+    if link_report is None:
+        return row      # fáze [LINKS] neproběhla – sekci vůbec neukazovat
+    row = _spacer(ws, row)
+    _title_row(ws, row, "NEFUNKČNÍ ODKAZY (404 / NEDOSTUPNÉ)", SUB); row += 1
+
+    broken = link_report.get("broken_links", [])
+    n_checked = link_report.get("checked_links", 0) + link_report.get("known_ok", 0)
+    if not broken:
+        ws.merge_cells(f"A{row}:G{row}")
+        if link_report.get("check_external"):
+            msg = f"✓ Všechny odkazy fungují ({n_checked} ověřeno, včetně externích)"
+        else:
+            msg = f"✓ Všechny interní odkazy fungují ({n_checked} ověřeno)"
+        ws.cell(row=row, column=1, value=msg)
+        ws.cell(row=row, column=1).font = _bf(color=G_FT, bold=True)
+        ws.row_dimensions[row].height = 20; row += 1
+    else:
+        _hdr_row(ws, [("Nefunkční cíl odkazu", 80), ("Status", 12),
+                      ("Nalezeno na stránkách", 100)], row=row, bg=SUB2)
+        ws.merge_cells(f"C{row}:G{row}")
+        for col in range(4, 8):
+            ws.cell(row=row, column=col).fill   = _fill(SUB2)
+            ws.cell(row=row, column=col).border = _brd()
+        row += 1
+        for b in broken:
+            target = b["url"] if b.get("external") else _as_https(b["url"])
+            _dc(ws, row, 1, target + ("  [externí]" if b.get("external") else ""),
+                bg=R_BG, ft=R_FT)
+            st = b.get("status") or 0
+            _badge(ws, row, 2, f"HTTP {st}" if st else "CHYBA", R_BG, R_FT)
+            srcs = b.get("sources", [])
+            ws.merge_cells(f"C{row}:G{row}")
+            _dc(ws, row, 3, _sources_cell(srcs))
+            ws.row_dimensions[row].height = max(18, 15 * min(len(srcs), 8))
+            row += 1
+
+    for note in _link_notes(link_report):
+        ws.merge_cells(f"A{row}:G{row}")
+        ws.cell(row=row, column=1, value=note)
+        ws.cell(row=row, column=1).font = _bf(color=GR_FT, sz=9)
+        ws.row_dimensions[row].height = 16; row += 1
+    return row
+
+
+def _link_notes(link_report: dict) -> list[str]:
+    """Poznámky pod sekcí odkazů: co se neověřovalo a proč."""
+    notes: list[str] = []
+    if link_report.get("aborted"):
+        notes.append(f"⚠ Kontrola odkazů přerušena: {link_report['aborted']} – "
+                     f"neověřené cíle se nehlásí jako chyba")
+    if link_report.get("skipped_external"):
+        notes.append(f"ℹ {link_report['skipped_external']} externích cílů nebylo ověřeno "
+                     f"– spusť s --check-external")
+    if link_report.get("collapsed_query"):
+        notes.append(f"ℹ {link_report['collapsed_query']} URL s parametry (filtry, ?v=…) "
+                     f"sloučeno na základní stránku")
+    if link_report.get("skipped_limit"):
+        notes.append(f"ℹ {link_report['skipped_limit']} cílů nad limit "
+                     f"{LINK_CHECK_MAX_TARGETS} neověřeno (ověřeny ty s nejvíc výskyty)")
+    if link_report.get("skipped_time"):
+        notes.append(f"ℹ {link_report['skipped_time']} cílů neověřeno – vyčerpán časový limit")
+    if link_report.get("unverified"):
+        notes.append(f"ℹ {link_report['unverified']} cílů neověřeno kvůli síťové chybě "
+                     f"(nehlásí se jako chyba)")
+    return notes
+
+
+def _write_images_section(ws, row: int, link_report: dict | None) -> int:
+    """Obrázky nedostupné nebo nad IMAGE_MAX_KB."""
+    if link_report is None:
+        return row
+    row = _spacer(ws, row)
+    _title_row(ws, row, f"OBRÁZKY – NEDOSTUPNÉ / VĚTŠÍ NEŽ {IMAGE_MAX_KB} kB", SUB); row += 1
+
+    images = link_report.get("images", [])
+    if not images:
+        ws.merge_cells(f"A{row}:G{row}")
+        ws.cell(row=row, column=1,
+                value=f"✓ Žádné nedostupné ani příliš velké obrázky "
+                      f"({link_report.get('checked_images', 0)} ověřeno)")
+        ws.cell(row=row, column=1).font = _bf(color=G_FT, bold=True)
+        ws.row_dimensions[row].height = 20
+        return row + 1
+
+    _hdr_row(ws, [("Obrázek", 80), ("Problém", 12), ("Velikost", 8), ("Status", 8),
+                  ("Na stránkách", 84)], row=row, bg=SUB2)
+    ws.merge_cells(f"E{row}:G{row}")
+    for col in range(6, 8):
+        ws.cell(row=row, column=col).fill   = _fill(SUB2)
+        ws.cell(row=row, column=col).border = _brd()
+    row += 1
+    for im in images:
+        is_broken = im.get("problem") == "broken"
+        bg, ft = (R_BG, R_FT) if is_broken else (O_BG, O_FT)
+        _dc(ws, row, 1, im["url"], bg=bg, ft=ft)
+        _badge(ws, row, 2, "NEDOSTUPNÝ" if is_broken else "VELKÝ", bg, ft)
+        size_kb = im.get("size_kb")
+        _dc(ws, row, 3, f"{size_kb} kB" if size_kb is not None else "–", align="center")
+        st = im.get("status") or 0
+        _dc(ws, row, 4, st if st else "–", align="center")
+        srcs = im.get("sources", [])
+        ws.merge_cells(f"E{row}:G{row}")
+        _dc(ws, row, 5, _sources_cell(srcs))
+        ws.row_dimensions[row].height = max(18, 15 * min(len(srcs), 8))
+        row += 1
+    return row
+
+
+def _write_comparison_section(ws, row: int, comparison: dict | None, max_rows: int = 50) -> int:
+    """Změny od minulého běhu: co přibylo a co je opravené."""
+    if not comparison:
+        return row
+    row = _spacer(ws, row)
+    _title_row(ws, row, f"ZMĚNY OD MINULÉHO BĚHU "
+                        f"({format_previous_date(comparison.get('previous_date', ''))})", SUB); row += 1
+
+    added   = comparison.get("pages_added", 0)
+    removed = comparison.get("pages_removed", 0)
+    ws.merge_cells(f"A{row}:G{row}")
+    ws.cell(row=row, column=1,
+            value=f"Porovnáno {comparison.get('pages_common', 0)} stránek přítomných v obou bězích"
+                  + (f"  |  nové stránky v auditu: {added}" if added else "")
+                  + (f"  |  stránky, které z auditu zmizely: {removed}" if removed else ""))
+    ws.cell(row=row, column=1).font = _bf(color=GR_FT, sz=9)
+    ws.row_dimensions[row].height = 16; row += 1
+
+    for title, items, bg, ft, badge in (
+        ("Nové problémy",     comparison.get("new", []),   R_BG, R_FT, "NOVÉ"),
+        ("Opravené problémy", comparison.get("fixed", []), G_BG, G_FT, "OPRAVENO"),
+    ):
+        _hdr_row(ws, [(f"{title} ({len(items)})", 80), ("", 12), ("Problém", 100)],
+                 row=row, bg=SUB2)
+        ws.merge_cells(f"C{row}:G{row}")
+        for col in range(4, 8):
+            ws.cell(row=row, column=col).fill   = _fill(SUB2)
+            ws.cell(row=row, column=col).border = _brd()
+        row += 1
+        if not items:
+            ws.merge_cells(f"A{row}:G{row}")
+            ws.cell(row=row, column=1, value="   – žádné –")
+            ws.cell(row=row, column=1).font = _bf(color=GR_FT, sz=9)
+            ws.row_dimensions[row].height = 16; row += 1
+            continue
+        for it in items[:max_rows]:
+            _dc(ws, row, 1, _as_https(it.get("url", "")))
+            _badge(ws, row, 2, badge, bg, ft)
+            ws.merge_cells(f"C{row}:G{row}")
+            _dc(ws, row, 3, it.get("label", ""))
+            ws.row_dimensions[row].height = 18; row += 1
+        if len(items) > max_rows:
+            ws.merge_cells(f"A{row}:G{row}")
+            ws.cell(row=row, column=1,
+                    value=f"   … a dalších {len(items) - max_rows} (kompletní seznam je v JSON)")
+            ws.cell(row=row, column=1).font = _bf(color=GR_FT, sz=9)
+            ws.row_dimensions[row].height = 16; row += 1
+    return row
+
+
 def _write_robots_section(ws, row: int, robots_issues: list, robots_skipped: bool) -> int:
     row = _spacer(ws, row)
     _title_row(ws, row, "ROBOTS.TXT – BLOKOVÁNÍ INDEXACE / JS / CSS (GOOGLEBOT)", SUB); row += 1
@@ -567,10 +762,15 @@ def _save_workbook(wb, output_path: Path) -> Path:
 
 def write_report(results: list, output_path: Path, start_url: str,
                  score: int = -1, source_label: str = "",
-                 domain_info: dict | None = None) -> Path:
+                 domain_info: dict | None = None,
+                 link_report: dict | None = None,
+                 comparison: dict | None = None) -> Path:
     """
     Generuje Excel report. Vrátí cestu k uloženému souboru – ta se může
     lišit od `output_path`, pokud byl původní soubor zamčený (viz _save_workbook).
+
+    link_report = výstup links_check.check_resources (None = sekce se vynechají)
+    comparison  = výstup report_json.compare_runs (None = bez porovnání)
     """
     if domain_info is None:
         domain_info = {}
@@ -603,10 +803,14 @@ def write_report(results: list, output_path: Path, start_url: str,
         ws.column_dimensions[col].width = w
 
     row = _write_header(ws, start_url, source_label)
-    row = _write_summary(ws, row, score, stats, http_converted=http_converted)
+    row = _write_summary(ws, row, score, stats, http_converted=http_converted,
+                         comparison=comparison)
+    row = _write_comparison_section(ws, row, comparison)
     row = _write_homepage_meta(ws, row, results)
     row = _write_w3c_section(ws, row, results, is_local_audit=is_local_audit)
     row = _write_structure_section(ws, row, results)
+    row = _write_links_section(ws, row, link_report)
+    row = _write_images_section(ws, row, link_report)
     row = _write_failed_pages(ws, row, results)
     row = _write_robots_section(ws, row, robots_issues, robots_skipped)
     row = _write_user_pages(ws, row, user_pages, is_local_audit=is_local_audit)
