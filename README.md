@@ -24,7 +24,7 @@ Na každé stránce se kontroluje 17 věcí (+ 1 napříč webem):
 | Alt texty u obrázků | Každý `<img>` musí mít `alt` atribut |
 | HTTP odkazy | Odhalí nezabezpečené `http://` odkazy |
 | Externí odkazy | Musí mít `target="_blank"` a `rel="noopener"` |
-| Testovací obsah | Detekuje lorem ipsum, asdf, qwerty a další zástupné texty |
+| Testovací obsah | Detekuje lorem ipsum, asdf, qwerty a další zástupné texty – viz **Detekce testovacího obsahu** níž |
 | `lang` atribut | `<html lang="cs">` je důležitý pro SEO a čtečky obrazovky |
 | Meta viewport | Bez něj se stránka na mobilech zobrazuje špatně |
 | `noindex` meta tag | Detekuje `<meta name="robots" content="noindex">` na produkci |
@@ -80,12 +80,17 @@ Skóre se počítá **váhově** — ne všechny problémy mají stejnou závaž
 |---|---|
 | Stránka má `noindex` (mimo dev domény) | **−25** |
 | Testovací obsah v produkci (lorem ipsum, asdf…) | **−20** |
+| Vývojářský výpis chyby v HTML (PHP Warning / Fatal error / Stack trace…) | **−20** |
+| Nevyrenderované šablonové proměnné v textu (`{{ }}`, `{% %}`, `%X%`, `<?php`) | **−15** |
+| Výchozí text CMS / šablony („Hello world!“, „Text odstavce“…) | **−15** |
 | Chybí `<h1>` | **−15** |
 | Chybí / prázdný `<title>` | **−15** |
 | Chybí meta description | **−15** |
 | Prázdná meta description | **−15** |
 | Chybí meta viewport | **−15** |
 | Chybí `lang` atribut na `<html>` | **−10** |
+| JavaScriptové hodnoty v textu (`undefined Kč`, `null`, `NaN`, `[object Object]`) | **−10** |
+| Výchozí text v `<title>` / description / `alt` / `og:*` („Document“, `alt="image"`) | **−10** |
 | Canonical míří na jinou URL (nebo je jich víc) | **−10** |
 | Duplicitní `<h1>` | **−8** |
 | Canonical používá `http://` na https stránce | **−8** |
@@ -126,6 +131,21 @@ Skóre se počítá **váhově** — ne všechny problémy mají stejnou závaž
 | 80–100 | Výborný | 🟢 |
 | 60–79 | Průměrný | 🟡 |
 | 0–59 | Špatný | 🔴 |
+
+### Detekce testovacího obsahu
+
+Kromě zakázaných frází (lorem ipsum, asdf, „vložte text“…) ve viditelném textu hlídá `content_check.py` šest dalších skupin. Každá má vlastní typ problému a váhu ve skóre; hlavní zásada je **žádné falešné poplachy** – hledá se jen na konkrétních místech (celý text prvku, celý `<title>`, konkrétní atribut) a obsah `<code>`, `<pre>`, `<script>`, `<style>`, `<textarea>` a `<template>` se ignoruje.
+
+| Skupina | Co chytí | Příklad |
+|---|---|---|
+| Výchozí texty | `<title>`, meta description, `og:title`/`og:description` nebo `alt` rovné výchozí hodnotě editoru | `<title>Document</title>`, `alt="image"`, `og:title="Home"` |
+| Zástupné obrázky | placeholder služby a soubory `dummy*`, `sample*`, `lorem*`, `placeholder*`, `test.jpg`/`test-1.png` (v `src`, `data-src`, `srcset`, `og:image`) | `https://via.placeholder.com/300`, `picsum.photos`, `/img/dummy.jpg` |
+| Šablonové proměnné | nevyrenderované `{{ … }}`, `{% … %}`, `[[ … ]]`, `%NAME%`, `${…}` v textu / title / meta; `<?php` v HTML | `Vítejte, {{ user.name }}` |
+| JS hodnoty | `undefined`, `null`, `NaN`, `[object Object]`, `Array` jako celý text prvku, s jednotkou („undefined Kč“) nebo v `href`/`src`/`alt` | `<span class="price">NaN Kč</span>` |
+| Vývojářské výpisy | PHP `Warning/Notice/Fatal error … on line N`, `Stack trace`, `Uncaught …Exception`, `var_dump`/`print_r`, SQL chyby, Tracy, Whoops, Symfony | `Warning: Undefined variable $x in /var/www/index.php on line 12` |
+| Výchozí texty CMS | WordPress („Hello world!“, „Just another WordPress site“, „Sample Page“), Joomla, Drupal, „Nadpis stránky“, „Text odstavce“, „Web je ve výstavbě“, „under construction“ | `<h2>Hello world!</h2>` |
+
+Lazy-load technika `src="placeholder.png" data-src="real.jpg"` se nehlásí (kontroluje se `data-src`); `{{ }}` uvnitř prvků Vue/Angular/Alpine (`v-*`, `ng-*`, `x-*`) se nehlásí. Ověřeno na ~190 stránkách reálných webů bez jediného falešného poplachu.
 
 > 💡 **Ladění vah:** všechny konstanty jsou nahoře v `stats.py` (`_BINARY_PENALTIES`, `_COUNTED_PENALTIES`, `_W3C_ERROR_*`). Dají se snadno upravit podle potřeb konkrétního auditu.
 
@@ -230,6 +250,7 @@ V závěrečném souhrnu je řádek `Doba fází : stažení 41s | validace 3s |
 ├── crawler.py          ← Paralelní crawler webu
 ├── sitemap.py          ← Načtení URL ze sitemap.xml
 ├── structure_check.py  ← HTML kontroly (vrací List[Issue])
+├── content_check.py    ← Detekce testovacího obsahu (6 skupin, volá structure_check)
 ├── validator_w3c.py    ← W3C validace (server + subprocess)
 ├── robots_check.py     ← robots.txt + /uzivatel/
 ├── links_check.py      ← Dostupnost odkazů a obrázků (404, velikost)
@@ -237,7 +258,7 @@ V závěrečném souhrnu je řádek `Doba fází : stažení 41s | validace 3s |
 ├── report_json.py      ← JSON výstup + porovnání s minulým během
 ├── updater.py          ← Aktualizace vnu.jar z GitHubu
 ├── colors.py           ← Barevný terminál
-├── tests/              ← Unit testy (280 testů)
+├── tests/              ← Unit testy (315 testů)
 │   ├── test_structure_check.py
 │   ├── test_other.py
 │   ├── test_network_checks.py
@@ -255,7 +276,7 @@ V závěrečném souhrnu je řádek `Doba fází : stažení 41s | validace 3s |
 python -m unittest discover tests/
 ```
 
-280 testů pokrývá všechny HTML kontroly (včetně noindex, staging URL, title, canonical, Open Graph a rozměrů obrázků), kontrolu odkazů a obrázků (mockované HEAD requesty, externí cíle, velikost, slučování URL s parametry, limit cílů, časový rozpočet, pojistka proti výpadku sítě), JSON export a porovnání s minulým během, CLI přepínače (`--exclude`, `--output`/`--keep`, `--fail-under` exit kódy), URL validaci, statistiky a agregaci W3C chyb, robots.txt parser (včetně detekce Disallow: /), sitemap parser (včetně `.xml.gz`), crawler (filtry, deduplikace, robots.txt, hybrid režim), detekci `/uzivatel/` (soft 404, přesměrování), kódování stažených stránek, zamčený Excel soubor a obsah vygenerovaného Excel reportu.
+315 testů pokrývá všechny HTML kontroly (včetně noindex, staging URL, title, canonical, Open Graph a rozměrů obrázků), detekci testovacího obsahu (všech 6 skupin, včetně testů na falešné poplachy u běžného českého textu), kontrolu odkazů a obrázků (mockované HEAD requesty, externí cíle, velikost, slučování URL s parametry, limit cílů, časový rozpočet, pojistka proti výpadku sítě), JSON export a porovnání s minulým během, CLI přepínače (`--exclude`, `--output`/`--keep`, `--fail-under` exit kódy), URL validaci, statistiky a agregaci W3C chyb, robots.txt parser (včetně detekce Disallow: /), sitemap parser (včetně `.xml.gz`), crawler (filtry, deduplikace, robots.txt, hybrid režim), detekci `/uzivatel/` (soft 404, přesměrování), kódování stažených stránek, zamčený Excel soubor a obsah vygenerovaného Excel reportu.
 
 ---
 

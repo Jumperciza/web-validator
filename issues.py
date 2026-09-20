@@ -38,6 +38,13 @@ class IssueType(Enum):
     BROKEN_LINK       = "broken_link"         # interní odkaz vrací 404 / je nedostupný
     IMG_BROKEN        = "img_broken"          # obrázek vrací 404 / je nedostupný
     IMG_TOO_LARGE     = "img_too_large"       # obrázek nad IMAGE_MAX_KB
+    # Testovací / zástupný obsah – rozšíření (content_check.py)
+    DEFAULT_META_TEXT = "default_meta_text"   # <title>/description/alt/og = výchozí hodnota
+    PLACEHOLDER_IMAGE = "placeholder_image"   # via.placeholder.com, picsum.photos, dummy.jpg…
+    TEMPLATE_VARIABLE = "template_variable"   # {{ name }}, {% %}, %NAME%, <?php v textu
+    JS_VALUE_IN_TEXT  = "js_value_in_text"    # undefined / null / NaN / [object Object]
+    DEV_ERROR_OUTPUT  = "dev_error_output"    # PHP Fatal error, Warning … on line, Stack trace
+    DEFAULT_CMS_TEXT  = "default_cms_text"    # Hello world!, Just another WordPress site…
     OTHER             = "other"
 
 
@@ -68,6 +75,12 @@ ISSUE_LABELS = {
     IssueType.BROKEN_LINK:       "Nefunkční odkazy (404 / nedostupné)",
     IssueType.IMG_BROKEN:        "Nedostupné obrázky (404)",
     IssueType.IMG_TOO_LARGE:     f"Příliš velké obrázky (nad {IMAGE_MAX_KB} kB)",
+    IssueType.DEFAULT_META_TEXT: "Výchozí / nevyplněný text v <title>, description, alt nebo og:*",
+    IssueType.PLACEHOLDER_IMAGE: "Zástupné obrázky (placeholder služby, dummy/sample soubory)",
+    IssueType.TEMPLATE_VARIABLE: "Nevyrenderované šablonové proměnné v textu ({{ }}, {% %}, %X%, <?php)",
+    IssueType.JS_VALUE_IN_TEXT:  "JavaScriptové hodnoty v textu (undefined / null / NaN / [object Object])",
+    IssueType.DEV_ERROR_OUTPUT:  "Vývojářský výpis chyby v HTML (PHP Warning / Fatal error / Stack trace…)",
+    IssueType.DEFAULT_CMS_TEXT:  "Výchozí text CMS / šablony (Hello world!, Sample Page, Text odstavce…)",
     IssueType.OTHER:             "Ostatní problémy",
 }
 

@@ -35,6 +35,9 @@ _BINARY_PENALTIES: dict[IssueType, float] = {
     # Kritické — SEO / mobile killer
     IssueType.NOINDEX:            25,   # web nebude indexován Googlem = SEO katastrofa
     IssueType.FORBIDDEN_CONTENT:  20,   # lorem ipsum v produkci = katastrofa
+    IssueType.DEV_ERROR_OUTPUT:   20,   # PHP Warning / Fatal error vypsané do stránky
+    IssueType.TEMPLATE_VARIABLE:  15,   # {{ name }} v textu = šablona se nevyrenderovala
+    IssueType.DEFAULT_CMS_TEXT:   15,   # "Hello world!", "Text odstavce" = nedodělaný obsah
     IssueType.MISSING_H1:         15,
     IssueType.MISSING_TITLE:      15,   # bez <title> Google vymýšlí vlastní, záložka = URL
     IssueType.MISSING_META_DESC:  15,
@@ -43,6 +46,8 @@ _BINARY_PENALTIES: dict[IssueType, float] = {
 
     # Střední
     IssueType.MISSING_LANG:       10,
+    IssueType.JS_VALUE_IN_TEXT:   10,   # "undefined Kč" – rozbitý JS, uživatel to vidí
+    IssueType.DEFAULT_META_TEXT:  10,   # <title>Document</title>, alt="image"
     IssueType.CANONICAL_MISMATCH: 10,   # stránka říká Googlu "indexuj místo mě jinou"
     IssueType.MULTIPLE_H1:         8,
     IssueType.CANONICAL_HTTP:      8,   # canonical na http:// verzi = duplicitní obsah
@@ -62,6 +67,7 @@ _COUNTED_PENALTIES: dict[IssueType, tuple[float, float]] = {
     IssueType.BROKEN_LINK:   (3.0, 15),   # 404 uvnitř webu = špatné UX i crawl budget
     IssueType.DUPLICATE_ID:  (3.0, 15),
     IssueType.IMG_BROKEN:    (2.0, 10),
+    IssueType.PLACEHOLDER_IMAGE: (5.0, 15),   # každý placeholder obrázek, cap 15
     IssueType.IMG_TOO_LARGE: (2.0, 10),
     IssueType.HTTP_LINK:     (2.0, 15),
     IssueType.MISSING_ALT:   (1.5, 15),
