@@ -10,6 +10,9 @@ Běží až po stažení všech stránek (main.py, fáze [LINKS]):
        • BROKEN_LINK   – interní odkaz vrací 404 / 5xx / je nedostupný
        • IMG_BROKEN    – obrázek vrací 404 / je nedostupný
        • IMG_TOO_LARGE – obrázek má Content-Length nad IMAGE_MAX_KB
+     Interní odkazy, které vedou přes přesměrování (301/302), se jen
+     zaznamenají do reportu (`redirects`) – nepenalizují se, ale odkaz má
+     správně mířit rovnou na cílovou URL.
 
 Externí cíle (jiná doména než auditovaný web) se ověřují jen s
 `--check-external` – u velkého webu jde o stovky cizích serverů a řada
@@ -104,6 +107,14 @@ def collapse_query(url: str) -> str:
     return urlunparse((p.scheme, p.netloc, p.path, p.params, "", ""))
 
 
+def is_trivial_redirect(url: str, target: str) -> bool:
+    """
+    True, když se URL a cíl přesměrování liší jen schématem (http→https),
+    `www.` nebo koncovým lomítkem – technicky správně, jen „kosmetika“.
+    """
+    return url_key(url) == url_key(target)
+
+
 def is_network_error(info: dict) -> bool:
     """True, když se k serveru vůbec nedalo dostat (DNS, odmítnuté spojení…)."""
     if info.get("status"):
@@ -169,16 +180,34 @@ def make_session(workers: int = CRAWL_WORKERS) -> requests.Session:
 def probe_url(session: requests.Session, url: str,
               timeout: float = DEFAULT_TIMEOUT) -> dict:
     """
-    Ověří jednu URL. Vrátí {"status": int, "size": int|None, "error": str}.
+    Ověří jednu URL. Vrátí {"status": int, "size": int|None, "error": str,
+    "redirect": str, "redirect_status": int}.
     status 0 = síťová chyba (timeout, DNS…). HEAD, při 403/405/501 GET
     (stream – tělo se nestahuje), protože některé servery HEAD nepodporují.
+
+    Přesměrování: první HEAD jde bez follow. Když server vrátí 3xx, zapíše se
+    kam (`redirect` = cílová URL, `redirect_status` = 301/302…) a cíl se
+    dojde druhým requestem – `status` je pak status KONCOVÉ stránky.
+    Cíl bez přesměrování má "redirect": "" a stojí jeden request jako dřív.
 
     Spojení se po HEAD NEzavírá (resp.close() by ho vyhodilo z poolu a každý
     další request by znovu dělal DNS + TCP + TLS) – HEAD nemá tělo, stačí
     ho "přečíst", tím se spojení vrátí do keep-alive poolu.
     """
+    redirect_to, redirect_status = "", 0
     try:
-        resp = session.head(url, timeout=timeout, allow_redirects=True)
+        resp = session.head(url, timeout=timeout, allow_redirects=False)
+        location = resp.headers.get("Location") if resp.headers else None
+        if 300 <= resp.status_code < 400 and location:
+            redirect_status = resp.status_code
+            resp.content
+            resp = session.head(url, timeout=timeout, allow_redirects=True)
+            # resp.url = kde jsme po všech skocích skončili; Location jen záloha
+            final_url = getattr(resp, "url", None)
+            if isinstance(final_url, str) and final_url and final_url != url:
+                redirect_to = final_url
+            else:
+                redirect_to = urljoin(url, str(location))
         if resp.status_code in _RETRY_WITH_GET:
             resp.content            # prázdné tělo HEAD → spojení zpět do poolu
             resp = session.get(url, timeout=timeout, allow_redirects=True, stream=True)
@@ -194,9 +223,11 @@ def probe_url(session: requests.Session, url: str,
             resp.close()            # tělo nechceme stahovat
         else:
             resp.content
-        return {"status": status, "size": size, "error": ""}
+        return {"status": status, "size": size, "error": "",
+                "redirect": redirect_to, "redirect_status": redirect_status}
     except Exception as e:
-        return {"status": 0, "size": None, "error": str(e)[:200]}
+        return {"status": 0, "size": None, "error": str(e)[:200],
+                "redirect": redirect_to, "redirect_status": redirect_status}
 
 
 def _status_label(info: dict) -> str:
@@ -221,6 +252,9 @@ def check_resources(results: list, base_url: str, check_external: bool = False,
       {
         "broken_links": [{"url", "status", "error", "external", "sources": [...]}],
         "images":       [{"url", "status", "error", "size_kb", "problem", "sources": [...]}],
+        "redirects":    [{"url", "status", "to", "final_status", "trivial", "sources": [...]}],
+                        # interní odkazy vedoucí přes 301/302; trivial = liší se
+                        # jen http→https / www / koncovým lomítkem
         "checked_links": int, "checked_images": int,   # kolik cílů se ověřovalo
         "known_ok": int,           # cílů = auditované stránky, neověřovaly se znovu
         "skipped_external": int,   # externích cílů vynecháno (bez --check-external)
@@ -423,6 +457,22 @@ def check_resources(results: list, base_url: str, check_external: bool = False,
                     type=itype, items=items[:50], count=len(items),
                 ))
 
+    # Interní odkazy přes přesměrování – informativně (bez Issue, bez penalizace)
+    redirects: list[dict] = []
+    for k, sources in link_sources.items():
+        info = probed.get(k)
+        if not info or not info.get("redirect"):
+            continue
+        if not _same_site(target_url[k], base_url):
+            continue
+        if not info["status"] or info["status"] >= 400:
+            continue                # cíl je nefunkční – už je v broken_links
+        redirects.append({"url": target_url[k], "status": info.get("redirect_status", 0),
+                          "to": info["redirect"], "final_status": info["status"],
+                          "trivial": is_trivial_redirect(target_url[k], info["redirect"]),
+                          "sources": list(sources)})
+    redirects.sort(key=lambda r: (r["trivial"], -len(r["sources"]), r["url"]))
+
     # Seřadit: nejdřív cíle s nejvíc zdroji (největší dopad)
     broken_links.sort(key=lambda b: (-len(b["sources"]), b["url"]))
     image_problems.sort(key=lambda b: (b["problem"] != "broken", -len(b["sources"]), b["url"]))
@@ -430,6 +480,7 @@ def check_resources(results: list, base_url: str, check_external: bool = False,
     return {
         "broken_links":     broken_links,
         "images":           image_problems,
+        "redirects":        redirects,
         "checked_links":    sum(1 for k in attempted if k in link_sources),
         "checked_images":   sum(1 for k in attempted if k in image_sources and k not in link_sources),
         "known_ok":         known_hits,

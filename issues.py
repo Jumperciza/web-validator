@@ -45,6 +45,9 @@ class IssueType(Enum):
     JS_VALUE_IN_TEXT  = "js_value_in_text"    # undefined / null / NaN / [object Object]
     DEV_ERROR_OUTPUT  = "dev_error_output"    # PHP Fatal error, Warning … on line, Stack trace
     DEFAULT_CMS_TEXT  = "default_cms_text"    # Hello world!, Just another WordPress site…
+    # Dostupnost (availability_check.py + structure_check.py)
+    SOFT_404          = "soft_404"            # HTTP 200, ale title/h1 = „Stránka nenalezena“
+    EMPTY_HREF        = "empty_href"          # <a href="#"> / href="" / javascript:void(0) s textem
     OTHER             = "other"
 
 
@@ -81,6 +84,8 @@ ISSUE_LABELS = {
     IssueType.JS_VALUE_IN_TEXT:  "JavaScriptové hodnoty v textu (undefined / null / NaN / [object Object])",
     IssueType.DEV_ERROR_OUTPUT:  "Vývojářský výpis chyby v HTML (PHP Warning / Fatal error / Stack trace…)",
     IssueType.DEFAULT_CMS_TEXT:  "Výchozí text CMS / šablony (Hello world!, Sample Page, Text odstavce…)",
+    IssueType.SOFT_404:          "Soft 404 – stránka hlásí „nenalezeno“, ale vrací HTTP 200",
+    IssueType.EMPTY_HREF:        "Prázdné odkazy (href=\"#\", href=\"\", javascript:void(0)) – odkaz nikam nevede",
     IssueType.OTHER:             "Ostatní problémy",
 }
 

@@ -48,6 +48,7 @@ _BINARY_PENALTIES: dict[IssueType, float] = {
     IssueType.MISSING_LANG:       10,
     IssueType.JS_VALUE_IN_TEXT:   10,   # "undefined Kč" – rozbitý JS, uživatel to vidí
     IssueType.DEFAULT_META_TEXT:  10,   # <title>Document</title>, alt="image"
+    IssueType.SOFT_404:           10,   # "Stránka nenalezena" s HTTP 200 – Google ji indexuje
     IssueType.CANONICAL_MISMATCH: 10,   # stránka říká Googlu "indexuj místo mě jinou"
     IssueType.MULTIPLE_H1:         8,
     IssueType.CANONICAL_HTTP:      8,   # canonical na http:// verzi = duplicitní obsah
@@ -72,6 +73,7 @@ _COUNTED_PENALTIES: dict[IssueType, tuple[float, float]] = {
     IssueType.HTTP_LINK:     (2.0, 15),
     IssueType.MISSING_ALT:   (1.5, 15),
     IssueType.EMPTY_TAG:     (0.5,  8),
+    IssueType.EMPTY_HREF:    (1.0,  5),   # <a href="#">Text</a> – nedodělaný odkaz
     IssueType.EXTERNAL_LINK: (0.5,  6),
     IssueType.IMG_NO_DIMENSIONS: (0.5, 5),
 }

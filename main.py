@@ -12,7 +12,8 @@ Struktura:
   validator_w3c.py   ← W3C validace (server mód + subprocess fallback)
   structure_check.py ← kontrola HTML struktury
   robots_check.py    ← kontrola robots.txt + /uzivatel/
-  links_check.py     ← dostupnost odkazů a obrázků (404, velikost)
+  links_check.py     ← dostupnost odkazů a obrázků (404, velikost, přesměrování)
+  availability_check.py ← soft 404, test vlastní 404 stránky, detekce bot ochrany
   report_excel.py    ← generování Excel reportu
   report_json.py     ← JSON výstup + porovnání s minulým během
   updater.py         ← kontrola verze vnu.jar z GitHubu
@@ -44,7 +45,9 @@ from robots_check    import (check_robots_js_css, check_user_pages,
 import validator_w3c as w3c_mod
 from structure_check import (check_structure, check_homepage_meta,
                              extract_title, mark_duplicate_titles)
-from links_check     import extract_refs, check_resources
+from links_check     import extract_refs, check_resources, is_trivial_redirect
+from availability_check import (check_not_found_page, detect_bot_challenge,
+                                bot_challenge_message, http_status_from_error)
 from report_excel    import write_report
 from report_json     import (build_json, write_json, build_json_path,
                              find_previous_json, load_previous, compare_runs,
@@ -78,7 +81,9 @@ def _sniff_meta_charset(html_bytes: bytes) -> str | None:
 def fetch_html(session: requests.Session, url: str, timeout: int = FETCH_TIMEOUT):
     """
     Stáhne HTML stránky přes sdílenou Session.
-    Vrátí (bytes, text, content_type) nebo (None, None, chyba).
+    Vrátí (bytes, text, content_type, final_url) nebo (None, None, chyba, "").
+    `final_url` je URL po přesměrování ("" když se nepřesměrovávalo) – sitemap
+    s URL, které se přesměrovávají, je hygienický problém (viz sitemap report).
 
     Kódování textu: pokud HTTP hlavička nenese charset, requests by pro
     text/* podle RFC použil ISO-8859-1 a česká diakritika by se rozbila
@@ -93,9 +98,11 @@ def fetch_html(session: requests.Session, url: str, timeout: int = FETCH_TIMEOUT
         if "charset=" not in ct.lower():
             resp.encoding = (_sniff_meta_charset(resp.content)
                              or resp.apparent_encoding or "utf-8")
-        return resp.content, resp.text, ct or "text/html"
+        final_url = resp.url if (resp.history and isinstance(resp.url, str)
+                                 and resp.url != url) else ""
+        return resp.content, resp.text, ct or "text/html", final_url
     except Exception as e:
-        return None, None, str(e)
+        return None, None, str(e), ""
 
 
 def _normalize_for_match(url: str) -> str:
@@ -222,7 +229,13 @@ def _fmt_duration(seconds: float) -> str:
     return f"{mins}m {secs}s" if mins else f"{secs}s"
 
 
-def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list:
+def validate_pages(pages: list, jar_path: str = "", start_url: str = "",
+                   delay: float | None = None) -> list:
+    """
+    Stáhne, zvaliduje (W3C) a zkontroluje (struktura) všechny stránky.
+    `delay` = pauza mezi requesty jednoho workeru při stahování; None =
+    výchozí FETCH_DELAY (stejná hodnota jako `--delay` u crawleru).
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     total    = len(pages)
@@ -231,7 +244,7 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
     # Lokální host = bez throttlingu. Dev server na vlastním stroji
     # nepotřebujeme šetřit, audit běží řádově rychleji.
     is_local = is_local_url(start_url)
-    fetch_pause = 0.0 if is_local else FETCH_DELAY
+    fetch_pause = 0.0 if is_local else (FETCH_DELAY if delay is None else max(0.0, delay))
 
     # Sdílená HTTP Session – keep-alive TCP spojení
     session = requests.Session()
@@ -281,15 +294,30 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
 
     def _do_validate(args: tuple) -> tuple:
         idx, url = args
-        html_bytes, html_text, content_type = html_data.get(url, (None, None, "chyba"))
+        html_bytes, html_text, content_type, final_url = html_data.get(
+            url, (None, None, "chyba", ""))
 
         if html_bytes is None:
             return idx, {
                 "url": url, "w3c_category": "validator_error",
                 "w3c_warnings": [], "w3c_errors": [],
                 "w3c_error_msg": content_type,
+                "http_status": http_status_from_error(content_type),
                 "structure_issues": [], "homepage_meta": [], "title": "",
-                "refs": {},
+                "refs": {}, "final_url": "",
+            }
+
+        # Bot ochrana (Anubis, Cloudflare…) vrátila ověřovací stránku místo
+        # obsahu – validovat ji by byl nesmysl (a zkreslilo by to celý audit).
+        challenge = detect_bot_challenge(html_text)
+        if challenge:
+            return idx, {
+                "url": url, "w3c_category": "validator_error",
+                "w3c_warnings": [], "w3c_errors": [],
+                "w3c_error_msg": bot_challenge_message(challenge),
+                "http_status": 200, "bot_challenge": challenge,
+                "structure_issues": [], "homepage_meta": [], "title": "",
+                "refs": {}, "final_url": final_url,
             }
 
         w3c_res    = [None]
@@ -350,6 +378,7 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
             "homepage_meta":    homepage_meta,
             "title":            title,
             "refs":             refs,
+            "final_url":        final_url,       # "" = bez přesměrování
         }
 
     ex = ThreadPoolExecutor(max_workers=LOCAL_WORKERS)
@@ -380,6 +409,16 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "") -> list
                 else "titulky" if n_dup_titles < 5 else "titulků")
         warn(f"  [!] Duplicitní <title>: {n_dup_titles} {noun} "
              f"se opakuje na více stránkách"); print("\n")
+
+    blocked = [r for r in results if r.get("bot_challenge")]
+    if blocked:
+        names = ", ".join(sorted({r["bot_challenge"] for r in blocked}))
+        err(f"  [!!] BOT OCHRANA ({names}): {len(blocked)} z {len(results)} stránek "
+            f"vrátilo ověřovací stránku místo obsahu."); print()
+        gray("       Tyto stránky se nevalidovaly a audit webu NENÍ platný – "
+             "je potřeba povolit User-Agent nástroje"); print()
+        gray(f"       („{USER_AGENT}“) v nastavení ochrany, nebo audit pustit "
+             f"z povolené IP."); print("\n")
 
     for i, r in enumerate(results, 1):
         _print_result(i, total, r["url"],
@@ -441,6 +480,14 @@ def run_link_checks(results: list, url: str, check_external: bool = False) -> di
     else:
         ok("  [✓]"); print(f" Obrázky v pořádku ({report['checked_images']} ověřeno)")
 
+    redirects = report.get("redirects") or []
+    if redirects:
+        n_trivial = sum(1 for r in redirects if r.get("trivial"))
+        extra = (f", z toho {n_trivial} jen http→https / www / lomítko"
+                 if n_trivial else "")
+        gray(f"  ({len(redirects)} interních odkazů vede přes přesměrování 301/302"
+             f"{extra} – viz report)"); print()
+
     if report["skipped_external"]:
         gray(f"  ({report['skipped_external']} externích cílů neověřeno – "
              f"zapni --check-external)"); print()
@@ -461,9 +508,10 @@ def run_link_checks(results: list, url: str, check_external: bool = False) -> di
 
 
 def run_domain_checks(url: str) -> dict:
-    """Spustí paralelně robots.txt + /uzivatel/ check."""
+    """Spustí paralelně robots.txt + /uzivatel/ check + test 404 stránky."""
     robots_result = [[], False]
     user_result   = [[]]
+    nf_result     = [None]
 
     def _do_robots():
         try:
@@ -479,16 +527,52 @@ def run_domain_checks(url: str) -> dict:
         except Exception:
             user_result[0] = []
 
+    def _do_not_found():
+        try:
+            nf_result[0] = check_not_found_page(url)
+        except Exception as e:
+            nf_result[0] = {"url": "", "status": 0, "final_status": 0, "final_url": "",
+                            "verdict": "unreachable", "soft_404_text": "",
+                            "message": f"Test 404 stránky se nepodařil: {e.__class__.__name__}"}
+
     t1 = threading.Thread(target=_do_robots)
     t2 = threading.Thread(target=_do_users)
-    t1.start(); t2.start()
-    t1.join();  t2.join()
+    t3 = threading.Thread(target=_do_not_found)
+    t1.start(); t2.start(); t3.start()
+    t1.join();  t2.join();  t3.join()
 
     return {
         "robots_issues":  robots_result[0],
         "robots_skipped": robots_result[1],
         "user_pages":     user_result[0],
+        "not_found":      nf_result[0],
     }
+
+
+def build_sitemap_report(sitemap_urls: list, results: list) -> dict | None:
+    """
+    Hygiena sitemap.xml: URL ze sitemapy, které vrací HTTP chybu (404/410/5xx),
+    jsou nedostupné, nebo se přesměrovávají jinam. None, když sitemap nebyla.
+    """
+    if not sitemap_urls:
+        return None
+    in_sitemap = set(sitemap_urls)
+    dead, unreachable, redirected = [], [], []
+    for r in results:
+        if r["url"] not in in_sitemap:
+            continue
+        if r.get("w3c_category") == "validator_error":
+            if r.get("bot_challenge"):
+                continue                     # to není chyba sitemapy
+            status = r.get("http_status") or http_status_from_error(r.get("w3c_error_msg") or "")
+            entry = {"url": r["url"], "status": status,
+                     "error": str(r.get("w3c_error_msg") or "")[:200]}
+            (dead if status >= 400 else unreachable).append(entry)
+        elif r.get("final_url"):
+            redirected.append({"url": r["url"], "to": r["final_url"],
+                               "trivial": is_trivial_redirect(r["url"], r["final_url"])})
+    return {"total": len(sitemap_urls), "dead": dead,
+            "unreachable": unreachable, "redirected": redirected}
 
 
 def make_filename(url: str) -> str:
@@ -583,7 +667,9 @@ def main():
     parser = argparse.ArgumentParser(description="Web Validator – W3C + HTML struktura")
     parser.add_argument("url", nargs="?", help="URL webu")
     parser.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES)
-    parser.add_argument("--delay",     type=float, default=1.0)
+    parser.add_argument("--delay",     type=float, default=None, metavar="S",
+                        help=f"Pauza mezi requesty v sekundách – platí pro crawler "
+                             f"(výchozí 1.0) i stahování stránek (výchozí {FETCH_DELAY})")
     parser.add_argument("--no-update-check", action="store_true",
                         help="Přeskoč kontrolu verze vnu.jar")
     parser.add_argument("--no-interactive", action="store_true",
@@ -701,6 +787,8 @@ def main():
     if exclude:
         gray(f"  Vynechávám URL podle vzorů: {', '.join(exclude)}"); print()
 
+    crawl_delay = 1.0 if args.delay is None else args.delay
+
     info("  [SITEMAP]"); print(" Hledám sitemap.xml...")
     sm_pages: list[str] = []
     try:
@@ -727,7 +815,7 @@ def main():
             gray(f"  Spouštím crawler s {len(sm_pages)} URL ze sitemapy jako seed..."); print()
             try:
                 extra = crawl_site(url, max_pages=args.max_pages,
-                                   delay=args.delay, seed_urls=sm_pages,
+                                   delay=crawl_delay, seed_urls=sm_pages,
                                    exclude=exclude)
                 pages = sm_pages + extra
                 source_label = (f"sitemap+crawler "
@@ -743,7 +831,7 @@ def main():
             gray("  Spouštím crawler..."); print()
             try:
                 pages        = crawl_site(url, max_pages=args.max_pages,
-                                          delay=args.delay, exclude=exclude)
+                                          delay=crawl_delay, exclude=exclude)
                 source_label = f"crawler ({len(pages)} URL)"
             except Exception as e:
                 err(f"  [✗] Crawler selhal: {e}"); print()
@@ -774,7 +862,8 @@ def main():
         domain_info = run_domain_checks(url)
     except Exception as e:
         err(f"  [!] Chyba doménových kontrol: {e}"); print()
-        domain_info = {"robots_issues": [], "robots_skipped": False, "user_pages": []}
+        domain_info = {"robots_issues": [], "robots_skipped": False, "user_pages": [],
+                       "not_found": None}
 
     robots_issues  = domain_info["robots_issues"]
     robots_skipped = domain_info["robots_skipped"]
@@ -811,13 +900,40 @@ def main():
         for p in user_pages:
             if p.get("note"):
                 gray(f"      ({p['note']})"); print()
+
+    not_found = domain_info.get("not_found")
+    if not_found:
+        verdict = not_found.get("verdict")
+        if verdict == "ok":
+            ok("  [✓]"); print(f" {not_found['message']}")
+        elif verdict in ("soft_404", "redirect_home", "redirect_200", "server_error"):
+            warn("  [!] "); print(not_found["message"])
+        else:
+            gray(f"  ({not_found['message']})"); print()
     print()
 
     # ── Validace stránek ─────────────────────────────────────────────────────
     info("--- VALIDACE + KONTROLA HTML START ---")
     ok(f" ({len(pages)} stránek)"); print("\n")
 
-    results = validate_pages(pages, jar_path=jar, start_url=url)
+    results = validate_pages(pages, jar_path=jar, start_url=url, delay=args.delay)
+
+    # ── Sitemap hygiena (neexistující / přesměrované URL) ────────────────────
+    sitemap_report = build_sitemap_report(sm_pages, results)
+    if sitemap_report and (sitemap_report["dead"] or sitemap_report["redirected"]
+                           or sitemap_report["unreachable"]):
+        n_dead = len(sitemap_report["dead"]); n_red = len(sitemap_report["redirected"])
+        n_unr = len(sitemap_report["unreachable"])
+        parts = []
+        if n_dead: parts.append(f"{n_dead} neexistujících URL (HTTP 4xx/5xx)")
+        if n_red:  parts.append(f"{n_red} URL se přesměrovává jinam")
+        if n_unr:  parts.append(f"{n_unr} nedostupných URL")
+        warn(f"  [!] Sitemap: {', '.join(parts)}"); print()
+        for e in sitemap_report["dead"][:5]:
+            gray(f"      HTTP {e['status']}  {e['url']}"); print()
+        if n_dead > 5:
+            gray(f"      … a dalších {n_dead - 5} (viz report)"); print()
+        print()
 
     # Server už není potřeba — ukončíme ho
     stop_server()
@@ -856,7 +972,8 @@ def main():
                                   source_label=source_label,
                                   domain_info=domain_info,
                                   link_report=link_report,
-                                  comparison=comparison)
+                                  comparison=comparison,
+                                  sitemap_report=sitemap_report)
         if saved_path != output_path:
             warn(f"  [!] Soubor {output_path.name} je otevřený v jiném programu – "
                  f"report uložen jako {saved_path.name}"); print()
@@ -871,7 +988,8 @@ def main():
         json_path = write_json(build_json(results, url, source_label=source_label,
                                           domain_info=domain_info,
                                           link_report=link_report,
-                                          comparison=comparison), json_path)
+                                          comparison=comparison,
+                                          sitemap_report=sitemap_report), json_path)
     except Exception as e:
         err(f"  [✗] Chyba při ukládání JSON: {e}"); print()
         json_path = None

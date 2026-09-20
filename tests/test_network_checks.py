@@ -291,26 +291,27 @@ class TestFetchEncoding(unittest.TestCase):
 
     def test_header_charset_respected(self):
         body = "<p>Příliš žluťoučký</p>".encode("windows-1250")
-        _, text, ct = self._fetch(body, "text/html; charset=windows-1250")
+        _, text, ct, final_url = self._fetch(body, "text/html; charset=windows-1250")
+        self.assertEqual(final_url, "")     # bez přesměrování
         self.assertIn("žluťoučký", text)
         self.assertEqual(ct, "text/html; charset=windows-1250")
 
     def test_meta_charset_used_when_header_missing(self):
         body = ('<html><head><meta charset="windows-1250"></head>'
                 '<body><p>Příliš žluťoučký</p></body></html>').encode("windows-1250")
-        _, text, _ = self._fetch(body, "text/html", apparent="ascii")
+        _, text, _, _ = self._fetch(body, "text/html", apparent="ascii")
         self.assertIn("žluťoučký", text)
 
     def test_meta_http_equiv_charset(self):
         body = ('<html><head><meta http-equiv="Content-Type" '
                 'content="text/html; charset=iso-8859-2"></head>'
                 '<body><p>Příliš žluťoučký</p></body></html>').encode("iso-8859-2")
-        _, text, _ = self._fetch(body, "text/html", apparent="ascii")
+        _, text, _, _ = self._fetch(body, "text/html", apparent="ascii")
         self.assertIn("žluťoučký", text)
 
     def test_apparent_encoding_fallback(self):
         body = "<p>Příliš žluťoučký kůň</p>".encode("utf-8")
-        _, text, _ = self._fetch(body, "text/html", apparent="utf-8")
+        _, text, _, _ = self._fetch(body, "text/html", apparent="utf-8")
         self.assertIn("žluťoučký", text)
 
     def test_unknown_meta_charset_ignored(self):
