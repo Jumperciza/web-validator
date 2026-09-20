@@ -9,6 +9,8 @@ Nástroj pro automatizovaný technický audit webu. Zadáš URL, program projde 
 ### 1. W3C validace HTML
 Každá stránka prochází lokální validací přes `vnu.jar` (offline, žádná data se neodesílají). Výsledky jsou rozděleny na **OK**, **Varování** a **Chyby**.
 
+Excel navíc obsahuje tabulku **„Nejčastější W3C chyby“** – stejné chyby ze všech stránek seskupené podle textu (bez čísla řádku): text chyby × počet stránek × počet výskytů × ukázková stránka (odkaz na validator.w3.org). U webů ze šablony tak hned vidíš, že např. 381 stránek s chybou = 2 chyby v šabloně. Zobrazuje se max 30 nejčastějších chyb; varování se neagregují.
+
 ### 2. Struktura HTML
 Na každé stránce se kontroluje 17 věcí (+ 1 napříč webem):
 
@@ -235,7 +237,7 @@ V závěrečném souhrnu je řádek `Doba fází : stažení 41s | validace 3s |
 ├── report_json.py      ← JSON výstup + porovnání s minulým během
 ├── updater.py          ← Aktualizace vnu.jar z GitHubu
 ├── colors.py           ← Barevný terminál
-├── tests/              ← Unit testy (273 testů)
+├── tests/              ← Unit testy (280 testů)
 │   ├── test_structure_check.py
 │   ├── test_other.py
 │   ├── test_network_checks.py
@@ -253,7 +255,7 @@ V závěrečném souhrnu je řádek `Doba fází : stažení 41s | validace 3s |
 python -m unittest discover tests/
 ```
 
-273 testů pokrývá všechny HTML kontroly (včetně noindex, staging URL, title, canonical, Open Graph a rozměrů obrázků), kontrolu odkazů a obrázků (mockované HEAD requesty, externí cíle, velikost, slučování URL s parametry, limit cílů, časový rozpočet, pojistka proti výpadku sítě), JSON export a porovnání s minulým během, CLI přepínače (`--exclude`, `--output`/`--keep`, `--fail-under` exit kódy), URL validaci, statistiky, robots.txt parser (včetně detekce Disallow: /), sitemap parser (včetně `.xml.gz`), crawler (filtry, deduplikace, robots.txt, hybrid režim), detekci `/uzivatel/` (soft 404, přesměrování), kódování stažených stránek, zamčený Excel soubor a obsah vygenerovaného Excel reportu.
+280 testů pokrývá všechny HTML kontroly (včetně noindex, staging URL, title, canonical, Open Graph a rozměrů obrázků), kontrolu odkazů a obrázků (mockované HEAD requesty, externí cíle, velikost, slučování URL s parametry, limit cílů, časový rozpočet, pojistka proti výpadku sítě), JSON export a porovnání s minulým během, CLI přepínače (`--exclude`, `--output`/`--keep`, `--fail-under` exit kódy), URL validaci, statistiky a agregaci W3C chyb, robots.txt parser (včetně detekce Disallow: /), sitemap parser (včetně `.xml.gz`), crawler (filtry, deduplikace, robots.txt, hybrid režim), detekci `/uzivatel/` (soft 404, přesměrování), kódování stažených stránek, zamčený Excel soubor a obsah vygenerovaného Excel reportu.
 
 ---
 
@@ -264,7 +266,7 @@ Report se ukládá do složky `excel reporty/`. Obsahuje:
 1. **Souhrn** – Web Quality Score + přehled počtů (+ změna skóre od minulého běhu)
 2. **Změny od minulého běhu** – nové a opravené problémy (jen když existuje minulý JSON)
 3. **Meta homepage** – délka title a description
-4. **W3C validace** – stránky s problémy jako klikatelné odkazy
+4. **W3C validace** – nejčastější chyby napříč webem (text × počet stránek × ukázka) a pak stránky s problémy jako klikatelné odkazy
 5. **HTML struktura** – problémy seskupené podle typu
 6. **Nefunkční odkazy** – cíl → status → stránky, kde odkaz je
 7. **Obrázky** – nedostupné nebo větší než 500 kB
