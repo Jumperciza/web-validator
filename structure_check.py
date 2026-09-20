@@ -12,7 +12,9 @@ Prováděné kontroly:
   6.  Alt texty u obrázků
   7.  HTTP odkazy (místo HTTPS)
   8.  Externí odkazy bez target="_blank" rel="noopener"
-  9.  Testovací / zástupný obsah
+  9.  Testovací / zástupný obsah (lorem ipsum…) + rozšířená detekce
+      v content_check.py (výchozí title/alt, placeholder obrázky, {{ }},
+      undefined, PHP výpisy, výchozí texty CMS)
   10. Chybějící lang atribut na <html>
   11. Chybějící <meta name="viewport">
   12. <meta name="robots" content="noindex"> mimo dev domény
@@ -43,6 +45,7 @@ from bs4 import BeautifulSoup
 
 from config import (META_TITLE_MIN, META_TITLE_MAX, META_DESC_MIN, META_DESC_MAX,
                     SKIP_NOINDEX_PATTERNS, STAGING_DOMAIN_PATTERNS)
+from content_check import check_test_content
 from issues import Issue, IssueType
 from ui import is_local_url
 
@@ -356,6 +359,11 @@ def check_structure(html: str, page_url: str = "") -> List[Issue]:
             items=[f'"{w}"' for w in found_words],
             count=len(found_words),
         ))
+
+    # 9b. Rozšířená detekce testovacího obsahu (content_check.py): výchozí
+    # title/alt/og, placeholder obrázky, {{ šablonové }} proměnné, undefined/
+    # null v textu, PHP výpisy chyb, výchozí texty CMS. Pracuje s kopií soup.
+    issues.extend(check_test_content(html, soup))
 
     # 10. lang atribut na <html>
     html_tag = soup.find("html")
