@@ -3,15 +3,16 @@ Kontrola HTML struktury.
 
 Vrací List[Issue] — strukturovaná data (viz issues.py).
 
-Prováděné kontroly:
+Prováděné kontroly (★ = SEO modul, hlásí se jen s `--seo`, viz
+`issues.SEO_ISSUE_TYPES`; ostatní = jádro, běží vždy):
   1.  Existence a duplikáty <h1>
-  2.  Pořadí nadpisů (žádné přeskočení)
+  2.  ★ Pořadí nadpisů (žádné přeskočení)
   3.  Prázdné tagy
   4.  Duplicitní ID
-  5.  Meta description (existence + neprázdnost)
-  6.  Alt texty u obrázků
+  5.  ★ Meta description (existence + neprázdnost)
+  6.  ★ Alt texty u obrázků
   7.  HTTP odkazy (místo HTTPS)
-  8.  Externí odkazy bez target="_blank" rel="noopener"
+  8.  ★ Externí odkazy bez target="_blank" rel="noopener"
   9.  Testovací / zástupný obsah (lorem ipsum…) + rozšířená detekce
       v content_check.py (výchozí title/alt, placeholder obrázky, {{ }},
       undefined, PHP výpisy, výchozí texty CMS)
@@ -20,16 +21,19 @@ Prováděné kontroly:
   12. <meta name="robots" content="noindex"> mimo dev domény
   13. URL ukazující na staging/dev domény (canonical, og:image, src, href...)
   14. <title> existuje a není prázdný (na každé stránce, ne jen na homepage)
-  15. <link rel="canonical"> – existuje, míří sám na sebe, není http:// na https
-  16. Open Graph meta (og:title, og:description, og:image) pro sdílení na sítích
-  17. <img> bez width/height (prohlížeč nezná rozměry → posun layoutu, CLS)
+  15. ★ <link rel="canonical"> – existuje, míří sám na sebe, není http:// na https
+  16. ★ Open Graph meta (og:title, og:description, og:image) pro sdílení na sítích
+  17. ★ <img> bez width/height (prohlížeč nezná rozměry → posun layoutu, CLS)
   18. Soft 404 – <title>/<h1> hlásí „Stránka nenalezena“, ale HTTP je 200
       (detekci má availability_check.py)
   19. Prázdné odkazy s textem (href="#", href="", javascript:void(0)) bez
       JS ovladače – nedodělané odkazy
 
 Napříč webem (po zpracování všech stránek, viz `mark_duplicate_titles`):
-  20. Duplicitní <title> na více stránkách
+  20. ★ Duplicitní <title> na více stránkách
+
+Délku <title> a meta description na homepage hlídá `check_homepage_meta`
+(také jen s `--seo`).
 
 Dostupnost odkazů a obrázků (404, velikost) řeší links_check.py – potřebuje
 síťové requesty, proto neběží tady.
@@ -51,7 +55,7 @@ from config import (META_TITLE_MIN, META_TITLE_MAX, META_DESC_MIN, META_DESC_MAX
                     SKIP_NOINDEX_PATTERNS, STAGING_DOMAIN_PATTERNS)
 from availability_check import detect_soft_404
 from content_check import check_test_content
-from issues import Issue, IssueType
+from issues import Issue, IssueType, SEO_ISSUE_TYPES
 from ui import is_local_url
 
 _EMPTY_TAGS = ["p", "div", "span", "section", "article",
@@ -217,11 +221,16 @@ def _extract_urls_from_srcset(srcset: str) -> list[str]:
 
 # ── Hlavní funkce ────────────────────────────────────────────────────────────
 
-def check_structure(html: str, page_url: str = "") -> List[Issue]:
+def check_structure(html: str, page_url: str = "", seo: bool = False) -> List[Issue]:
     """
     Vrátí seznam Issue objektů.
     page_url slouží k rozlišení interních vs. externích odkazů a k detekci
     lokálního prostředí (kde se některé kontroly přeskočí).
+    seo=False (výchozí, stejně jako CLI bez `--seo`) = kontroly ze SEO modulu
+    (`issues.SEO_ISSUE_TYPES`: meta description, canonical, Open Graph, alt,
+    rozměry obrázků, noopener, pořadí nadpisů) se ve výsledku neobjeví.
+    Kontroly běží všechny a filtruje se až výsledek – jeden zdroj pravdy je
+    množina typů, ne podmínky roztroušené po funkci.
     """
     issues: List[Issue] = []
     soup   = BeautifulSoup(html, _PARSER)
@@ -581,6 +590,10 @@ def check_structure(html: str, page_url: str = "") -> List[Issue]:
             count=len(empty_links),
         ))
 
+    # SEO modul je vypnutý → jeho nálezy se zahodí (kontroly jsou levné,
+    # parsování HTML stojí víc než všech 19 kontrol dohromady).
+    if not seo:
+        issues = [i for i in issues if i.type not in SEO_ISSUE_TYPES]
     return issues
 
 

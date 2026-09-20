@@ -8,7 +8,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 from config import IMAGE_MAX_KB, LINK_CHECK_MAX_TARGETS
-from issues import Issue
+from issues import Issue, is_seo_issue
 from report_json import format_previous_date
 from robots_check import CRITICAL_PREFIX as ROBOTS_CRITICAL_PREFIX
 from stats  import compute_stats, aggregate_w3c_errors
@@ -126,7 +126,8 @@ def _write_header(ws, start_url: str, source_label: str) -> int:
 
 def _write_summary(ws, row: int, score: int, stats, http_converted: bool = False,
                    comparison: dict | None = None,
-                   bot_blocked: tuple[int, str] | None = None) -> int:
+                   bot_blocked: tuple[int, str] | None = None,
+                   seo: bool = False) -> int:
     _title_row(ws, row, "SOUHRN", SUB); row += 1
 
     # Bot ochrana vrátila ověřovací stránky → audit není platný. Musí být
@@ -219,6 +220,21 @@ def _write_summary(ws, row: int, score: int, stats, http_converted: bool = False
                        value="ℹ Sitemap obsahovala URL s http:// – v reportu jsou zobrazeny jako https://")
         cell.font = _bf(bold=False, color=B_FT, sz=10)
         cell.fill = _fill(B_BG)
+        cell.alignment = _al("center")
+        cell.border = _brd()
+        ws.row_dimensions[row].height = 20
+        row += 1
+
+    # SEO modul je ve výchozím stavu vypnutý – ať je z reportu jasné, že
+    # meta description, canonical, OG… chybí záměrně, ne že je web bez chyb.
+    if not seo:
+        ws.merge_cells(f"A{row}:G{row}")
+        cell = ws.cell(row=row, column=1,
+                       value="ℹ SEO kontroly (meta description, canonical, Open Graph, "
+                             "alt texty, rozměry a velikost obrázků, noopener, nadpisy, "
+                             "duplicitní <title>) jsou vypnuté – zapni přepínačem --seo")
+        cell.font = _bf(bold=False, color=GR_FT, sz=10)
+        cell.fill = _fill(GR_BG)
         cell.alignment = _al("center")
         cell.border = _brd()
         ws.row_dimensions[row].height = 20
@@ -482,11 +498,33 @@ def _write_w3c_section(ws, row: int, results: list, is_local_audit: bool = False
 
 def _write_structure_section(ws, row: int, results: list) -> int:
     """
-    Souhrn strukturálních problémů.
-    Pracuje přímo s Issue objekty — žádný text-parsing!
+    Souhrn strukturálních problémů (jádro – bez SEO typů, ty má vlastní
+    sekce `_write_seo_section`). Pracuje přímo s Issue objekty — žádný
+    text-parsing!
     """
+    return _write_issue_table(
+        ws, row, results, "HTML STRUKTURA – SOUHRN PROBLÉMŮ",
+        keep=lambda issue: not is_seo_issue(issue),
+        empty_text="✓ Žádné strukturální problémy nalezeny",
+    )
+
+
+def _write_seo_section(ws, row: int, results: list, seo: bool) -> int:
+    """SEO modul (jen s `--seo`): meta description, canonical, OG, alt…"""
+    if not seo:
+        return row
+    return _write_issue_table(
+        ws, row, results, "SEO – SOUHRN PROBLÉMŮ (zapnuto přepínačem --seo)",
+        keep=is_seo_issue,
+        empty_text="✓ Žádné SEO problémy nalezeny",
+    )
+
+
+def _write_issue_table(ws, row: int, results: list, title: str, keep,
+                       empty_text: str) -> int:
+    """Tabulka „typ problému | počet URL | stránky“ pro Issue splňující `keep`."""
     row = _spacer(ws, row)
-    _title_row(ws, row, "HTML STRUKTURA – SOUHRN PROBLÉMŮ", SUB); row += 1
+    _title_row(ws, row, title, SUB); row += 1
 
     # Seskupení podle labelu (Issue.label zahrnuje i konkrétní tag pro EMPTY_TAG)
     grouped: dict[str, list[str]] = defaultdict(list)
@@ -495,7 +533,7 @@ def _write_structure_section(ws, row: int, results: list) -> int:
         issues = r.get("structure_issues", [])
         for issue in issues:
             # Ignoruj non-Issue objekty (pro jistotu backward compat)
-            if not isinstance(issue, Issue):
+            if not isinstance(issue, Issue) or not keep(issue):
                 continue
             label = issue.label
             url_https = _as_https(r["url"])
@@ -504,7 +542,7 @@ def _write_structure_section(ws, row: int, results: list) -> int:
 
     if not grouped:
         ws.merge_cells(f"A{row}:G{row}")
-        ws.cell(row=row, column=1, value="✓ Žádné strukturální problémy nalezeny")
+        ws.cell(row=row, column=1, value=empty_text)
         ws.cell(row=row, column=1).font = _bf(color=G_FT, bold=True)
         ws.row_dimensions[row].height = 20
         return row + 1
@@ -686,19 +724,25 @@ def _link_notes(link_report: dict) -> list[str]:
     return notes
 
 
-def _write_images_section(ws, row: int, link_report: dict | None) -> int:
-    """Obrázky nedostupné nebo nad IMAGE_MAX_KB."""
+def _write_images_section(ws, row: int, link_report: dict | None,
+                          seo: bool = False) -> int:
+    """Obrázky nedostupné, s `--seo` i nad IMAGE_MAX_KB."""
     if link_report is None:
         return row
     row = _spacer(ws, row)
-    _title_row(ws, row, f"OBRÁZKY – NEDOSTUPNÉ / VĚTŠÍ NEŽ {IMAGE_MAX_KB} kB", SUB); row += 1
+    if seo:
+        _title_row(ws, row, f"OBRÁZKY – NEDOSTUPNÉ / VĚTŠÍ NEŽ {IMAGE_MAX_KB} kB", SUB)
+    else:
+        _title_row(ws, row, "OBRÁZKY – NEDOSTUPNÉ", SUB)
+    row += 1
 
     images = link_report.get("images", [])
     if not images:
         ws.merge_cells(f"A{row}:G{row}")
         ws.cell(row=row, column=1,
-                value=f"✓ Žádné nedostupné ani příliš velké obrázky "
-                      f"({link_report.get('checked_images', 0)} ověřeno)")
+                value=("✓ Žádné nedostupné ani příliš velké obrázky " if seo
+                       else "✓ Žádné nedostupné obrázky ")
+                      + f"({link_report.get('checked_images', 0)} ověřeno)")
         ws.cell(row=row, column=1).font = _bf(color=G_FT, bold=True)
         ws.row_dimensions[row].height = 20
         return row + 1
@@ -744,6 +788,14 @@ def _write_comparison_section(ws, row: int, comparison: dict | None, max_rows: i
                   + (f"  |  stránky, které z auditu zmizely: {removed}" if removed else ""))
     ws.cell(row=row, column=1).font = _bf(color=GR_FT, sz=9)
     ws.row_dimensions[row].height = 16; row += 1
+
+    if comparison.get("seo_ignored"):
+        ws.merge_cells(f"A{row}:G{row}")
+        ws.cell(row=row, column=1,
+                value="ℹ Jeden z běhů měl SEO kontroly (--seo) vypnuté a druhý zapnuté – "
+                      "SEO problémy se v porovnání ignorují, změna skóre je tím ovlivněná")
+        ws.cell(row=row, column=1).font = _bf(color=GR_FT, sz=9)
+        ws.row_dimensions[row].height = 16; row += 1
 
     for title, items, bg, ft, badge in (
         ("Nové problémy",     comparison.get("new", []),   R_BG, R_FT, "NOVÉ"),
@@ -1010,7 +1062,8 @@ def write_report(results: list, output_path: Path, start_url: str,
                  domain_info: dict | None = None,
                  link_report: dict | None = None,
                  comparison: dict | None = None,
-                 sitemap_report: dict | None = None) -> Path:
+                 sitemap_report: dict | None = None,
+                 seo: bool = False) -> Path:
     """
     Generuje Excel report. Vrátí cestu k uloženému souboru – ta se může
     lišit od `output_path`, pokud byl původní soubor zamčený (viz _save_workbook).
@@ -1018,6 +1071,8 @@ def write_report(results: list, output_path: Path, start_url: str,
     link_report    = výstup links_check.check_resources (None = sekce se vynechají)
     comparison     = výstup report_json.compare_runs (None = bez porovnání)
     sitemap_report = výstup main.build_sitemap_report (None = sitemap nebyla)
+    seo            = audit běžel s `--seo` → sekce SEO + META – HOMEPAGE,
+                     obrázky i podle velikosti; bez něj poznámka v souhrnu
     """
     if domain_info is None:
         domain_info = {}
@@ -1056,14 +1111,16 @@ def write_report(results: list, output_path: Path, start_url: str,
 
     row = _write_header(ws, start_url, source_label)
     row = _write_summary(ws, row, score, stats, http_converted=http_converted,
-                         comparison=comparison, bot_blocked=bot_blocked)
+                         comparison=comparison, bot_blocked=bot_blocked, seo=seo)
     row = _write_comparison_section(ws, row, comparison)
-    row = _write_homepage_meta(ws, row, results)
     row = _write_w3c_top_errors(ws, row, results, is_local_audit=is_local_audit)
     row = _write_w3c_section(ws, row, results, is_local_audit=is_local_audit)
     row = _write_structure_section(ws, row, results)
+    row = _write_seo_section(ws, row, results, seo)
+    if seo:
+        row = _write_homepage_meta(ws, row, results)
     row = _write_links_section(ws, row, link_report)
-    row = _write_images_section(ws, row, link_report)
+    row = _write_images_section(ws, row, link_report, seo=seo)
     row = _write_failed_pages(ws, row, results)
     row = _write_sitemap_section(ws, row, sitemap_report)
     row = _write_robots_section(ws, row, robots_issues, robots_skipped)

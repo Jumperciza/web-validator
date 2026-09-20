@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from issues import Issue
+from issues import Issue, SEO_ISSUE_TYPES
 from stats import compute_stats, page_score
 
 JSON_VERSION = 1
@@ -45,8 +45,8 @@ def _page_key(url: str) -> str:
 def build_json(results: list, start_url: str, source_label: str = "",
                domain_info: dict | None = None, link_report: dict | None = None,
                comparison: dict | None = None, generated_at: datetime | None = None,
-               sitemap_report: dict | None = None) -> dict:
-    """Sestaví serializovatelný dict z výsledků auditu."""
+               sitemap_report: dict | None = None, seo: bool = False) -> dict:
+    """Sestaví serializovatelný dict z výsledků auditu. `seo` = běželo s `--seo`."""
     stats = compute_stats(results)
     domain_info = domain_info or {}
     link_report = link_report or {}
@@ -75,6 +75,7 @@ def build_json(results: list, start_url: str, source_label: str = "",
         "url":          start_url,
         "score":        stats.score,
         "source":       source_label,
+        "seo":          seo,             # SEO modul zapnutý (--seo)?
         "summary": {
             "total":       stats.total,
             "w3c_ok":      stats.w3c_ok,
@@ -193,13 +194,17 @@ def load_previous(path: Path | None) -> dict | None:
 
 # ── Porovnání ────────────────────────────────────────────────────────────────
 
-def _issue_keys(page: dict) -> set[str]:
+_SEO_TYPE_VALUES = frozenset(t.value for t in SEO_ISSUE_TYPES)
+
+
+def _issue_keys(page: dict, skip_seo: bool = False) -> set[str]:
     """
     Množina „problémů“ stránky pro porovnání: label každého strukturálního
     Issue + každá W3C chyba (podle textu, bez čísla řádku – posun o řádek
-    není oprava ani nový problém).
+    není oprava ani nový problém). `skip_seo` vynechá SEO typy.
     """
-    keys = {i.get("label", "") for i in page.get("issues", []) if i.get("label")}
+    keys = {i.get("label", "") for i in page.get("issues", [])
+            if i.get("label") and not (skip_seo and i.get("type") in _SEO_TYPE_VALUES)}
     for e in page.get("w3c_errors", []):
         msg = (e.get("message") if isinstance(e, dict) else str(e)) or ""
         if msg:
@@ -213,20 +218,26 @@ def compare_runs(previous: dict, current: dict) -> dict:
     přítomné v obou bězích – stránka, která z auditu zmizela, by jinak
     „opravila“ všechny své problémy.
 
+    Když měl jen jeden z běhů zapnutý SEO modul (`--seo`), SEO problémy se
+    z porovnání vynechají (jinak by „zmizely“ nebo „přibyly“ desítky
+    problémů bez jediné změny na webu) a výsledek má `seo_ignored: True`.
+    Starší JSON bez klíče "seo" se bere jako s SEO (tehdy běželo vždy).
+
     Vrací:
       {"previous_date", "previous_score", "score", "delta",
        "fixed": [{"url","label"}], "new": [...], "fixed_count", "new_count",
-       "pages_common", "pages_added", "pages_removed"}
+       "pages_common", "pages_added", "pages_removed", "seo_ignored"}
     """
     prev_pages = {_page_key(p["url"]): p for p in previous.get("pages", []) if p.get("url")}
     cur_pages  = {_page_key(p["url"]): p for p in current.get("pages", [])  if p.get("url")}
     common = [k for k in cur_pages if k in prev_pages]
+    skip_seo = bool(previous.get("seo", True)) != bool(current.get("seo", True))
 
     fixed: list[dict] = []
     new:   list[dict] = []
     for k in common:
-        before = _issue_keys(prev_pages[k])
-        after  = _issue_keys(cur_pages[k])
+        before = _issue_keys(prev_pages[k], skip_seo=skip_seo)
+        after  = _issue_keys(cur_pages[k], skip_seo=skip_seo)
         url = cur_pages[k]["url"]
         for label in sorted(before - after):
             fixed.append({"url": url, "label": label})
@@ -247,6 +258,7 @@ def compare_runs(previous: dict, current: dict) -> dict:
         "pages_common":   len(common),
         "pages_added":    sum(1 for k in cur_pages if k not in prev_pages),
         "pages_removed":  sum(1 for k in prev_pages if k not in cur_pages),
+        "seo_ignored":    skip_seo,
     }
 
 

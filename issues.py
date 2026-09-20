@@ -51,6 +51,36 @@ class IssueType(Enum):
     OTHER             = "other"
 
 
+# SEO modul – tyto typy se hledají a hlásí jen s přepínačem `--seo`
+# (kousek D, 2026-09-20). Jsou to věci, které nerozhodují o tom, zda web
+# „funguje“, a které pokrývají samostatné SEO testy: meta description,
+# canonical, Open Graph, alt texty (chybějící alt navíc hlásí i vnu.jar jako
+# W3C chybu), rozměry a velikost obrázků, noopener u externích odkazů,
+# pořadí nadpisů a duplicitní <title> napříč webem. Všechno ostatní je
+# „jádro“ a běží vždy: W3C, testovací obsah, dostupnost, noindex, staging
+# URL, H1, <title>, lang, viewport, prázdné tagy/odkazy, http:// odkazy.
+SEO_ISSUE_TYPES = frozenset({
+    IssueType.HEADING_SKIP,
+    IssueType.MISSING_META_DESC,
+    IssueType.EMPTY_META_DESC,
+    IssueType.MISSING_ALT,
+    IssueType.EXTERNAL_LINK,
+    IssueType.DUPLICATE_TITLE,
+    IssueType.MISSING_CANONICAL,
+    IssueType.CANONICAL_MISMATCH,
+    IssueType.CANONICAL_HTTP,
+    IssueType.MISSING_OG,
+    IssueType.IMG_NO_DIMENSIONS,
+    IssueType.IMG_TOO_LARGE,
+})
+
+
+def is_seo_issue(issue) -> bool:
+    """True pro Issue (nebo IssueType) patřící do SEO modulu."""
+    itype = issue if isinstance(issue, IssueType) else getattr(issue, "type", None)
+    return itype in SEO_ISSUE_TYPES
+
+
 # Český popis každého typu (pro zobrazení v reportu)
 ISSUE_LABELS = {
     IssueType.MISSING_H1:        "Chybí <h1> tag",

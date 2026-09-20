@@ -523,13 +523,20 @@ class TestWriteReportContent(unittest.TestCase):
             "Description: Chybí",
             "",
         ])]
-        vals = self._write(results)
+        vals = self._write(results, seo=True)
         self.assertIn("Title", vals); self.assertIn("45 znaků – v pořádku", vals)
         self.assertIn("OK", vals);    self.assertIn("PROBLÉM", vals)
 
     def test_homepage_meta_missing(self):
-        vals = self._write([_page("https://example.cz/")])
+        vals = self._write([_page("https://example.cz/")], seo=True)
         self.assertIn("Žádná data", vals)
+
+    def test_homepage_meta_hidden_without_seo(self):
+        """Bez --seo se sekce META – HOMEPAGE nevypisuje vůbec."""
+        results = [_page("https://example.cz/", homepage_meta=["Title: 45 znaků – v pořádku"])]
+        vals = self._write(results)
+        self.assertFalse(any("META – HOMEPAGE" in v for v in vals))
+        self.assertNotIn("45 znaků – v pořádku", vals)
 
 
 if __name__ == "__main__":
