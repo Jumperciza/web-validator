@@ -5,7 +5,10 @@ Všechny "magic numbers" jsou zde — snadné úpravy a konzistentní chování.
 """
 
 # ── HTTP identifikace ────────────────────────────────────────────────────────
-USER_AGENT      = "Mozilla/5.0 (compatible; WebValidator/1.0)"
+# Záměrně BEZ "Mozilla": bot ochrana Anubis (PoskiREAL weby) dává každému UA
+# s "Mozilla" stránku "Making sure you're not a bot!" místo obsahu. Poctivý
+# bot UA bez Mozilla projde (2026-09-20 ověřeno na nadin-reality.cz).
+USER_AGENT      = "WebValidator/1.0 (+https://github.com/Jumperciza/web-validator)"
 ACCEPT_LANGUAGE = "cs-CZ,cs;q=0.9,en;q=0.8"
 
 # ── Timeouty (sekundy) ───────────────────────────────────────────────────────
