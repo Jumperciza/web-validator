@@ -48,18 +48,18 @@ class TestH1(unittest.TestCase):
 class TestHeadingOrder(unittest.TestCase):
     def test_correct_order(self):
         html = "<h1>A</h1><h2>B</h2><h3>C</h3>"
-        issues = check_structure(html)
+        issues = check_structure(html, seo=True)
         self.assertFalse(_has_issue(issues, IssueType.HEADING_SKIP))
 
     def test_skip_level(self):
         html = "<h1>A</h1><h3>C</h3>"
-        issues = check_structure(html)
+        issues = check_structure(html, seo=True)
         self.assertTrue(_has_issue(issues, IssueType.HEADING_SKIP))
 
     def test_skip_deduplication(self):
         """Stejný skip se nesmí objevit 2× ve výsledku."""
         html = "<h1>A</h1><h3>C</h3><h1>D</h1><h3>E</h3>"
-        issues = check_structure(html)
+        issues = check_structure(html, seo=True)
         skip = _get_issue(issues, IssueType.HEADING_SKIP)
         # Jeden unikátní skip: h1→h3
         self.assertEqual(len(skip.items), 1)
@@ -103,17 +103,17 @@ class TestDuplicateID(unittest.TestCase):
 class TestMetaDescription(unittest.TestCase):
     def test_missing(self):
         html = "<html><head></head><body><h1>A</h1></body></html>"
-        issues = check_structure(html)
+        issues = check_structure(html, seo=True)
         self.assertTrue(_has_issue(issues, IssueType.MISSING_META_DESC))
 
     def test_empty(self):
         html = '<html><head><meta name="description" content=""></head><body><h1>A</h1></body></html>'
-        issues = check_structure(html)
+        issues = check_structure(html, seo=True)
         self.assertTrue(_has_issue(issues, IssueType.EMPTY_META_DESC))
 
     def test_present(self):
         html = '<html><head><meta name="description" content="Popis webu"></head><body><h1>A</h1></body></html>'
-        issues = check_structure(html)
+        issues = check_structure(html, seo=True)
         self.assertFalse(_has_issue(issues, IssueType.MISSING_META_DESC))
         self.assertFalse(_has_issue(issues, IssueType.EMPTY_META_DESC))
 
@@ -121,7 +121,7 @@ class TestMetaDescription(unittest.TestCase):
 class TestAltText(unittest.TestCase):
     def test_missing_alt(self):
         html = "<h1>A</h1><img src='/logo.png'>"
-        issues = check_structure(html)
+        issues = check_structure(html, seo=True)
         issue = _get_issue(issues, IssueType.MISSING_ALT)
         self.assertIsNotNone(issue)
         self.assertEqual(issue.count, 1)
@@ -129,12 +129,12 @@ class TestAltText(unittest.TestCase):
     def test_empty_alt_ok(self):
         """alt="" je OK (dekorativní obrázek), chybí jen když alt není vůbec."""
         html = "<h1>A</h1><img src='/logo.png' alt=''>"
-        issues = check_structure(html)
+        issues = check_structure(html, seo=True)
         self.assertFalse(_has_issue(issues, IssueType.MISSING_ALT))
 
     def test_alt_present_ok(self):
         html = "<h1>A</h1><img src='/logo.png' alt='Logo'>"
-        issues = check_structure(html)
+        issues = check_structure(html, seo=True)
         self.assertFalse(_has_issue(issues, IssueType.MISSING_ALT))
 
 
@@ -165,46 +165,46 @@ class TestHttpLinks(unittest.TestCase):
 class TestExternalLinks(unittest.TestCase):
     def test_external_without_target(self):
         html = '<h1>A</h1><a href="https://other.com">link</a>'
-        issues = check_structure(html, page_url="https://myweb.cz/")
+        issues = check_structure(html, seo=True, page_url="https://myweb.cz/")
         self.assertTrue(_has_issue(issues, IssueType.EXTERNAL_LINK))
 
     def test_external_with_both_ok(self):
         html = '<h1>A</h1><a href="https://other.com" target="_blank" rel="noopener">link</a>'
-        issues = check_structure(html, page_url="https://myweb.cz/")
+        issues = check_structure(html, seo=True, page_url="https://myweb.cz/")
         self.assertFalse(_has_issue(issues, IssueType.EXTERNAL_LINK))
 
     def test_noreferrer_also_ok(self):
         """rel="noreferrer" implicitně zahrnuje noopener."""
         html = '<h1>A</h1><a href="https://other.com" target="_blank" rel="noreferrer">link</a>'
-        issues = check_structure(html, page_url="https://myweb.cz/")
+        issues = check_structure(html, seo=True, page_url="https://myweb.cz/")
         self.assertFalse(_has_issue(issues, IssueType.EXTERNAL_LINK))
 
     def test_internal_link_not_flagged(self):
         """Interní odkaz (stejná doména) nemá povinnost mít target/noopener."""
         html = '<h1>A</h1><a href="https://myweb.cz/jina-stranka">link</a>'
-        issues = check_structure(html, page_url="https://myweb.cz/")
+        issues = check_structure(html, seo=True, page_url="https://myweb.cz/")
         self.assertFalse(_has_issue(issues, IssueType.EXTERNAL_LINK))
 
     def test_www_variant_still_internal(self):
         """myweb.cz a www.myweb.cz je stejná doména."""
         html = '<h1>A</h1><a href="https://www.myweb.cz/page">link</a>'
-        issues = check_structure(html, page_url="https://myweb.cz/")
+        issues = check_structure(html, seo=True, page_url="https://myweb.cz/")
         self.assertFalse(_has_issue(issues, IssueType.EXTERNAL_LINK))
 
     def test_protocol_relative_external_detected(self):
         """//jina-domena.cz je externí odkaz – prohlížeč doplní schéma stránky."""
         html = '<h1>A</h1><a href="//other.com/page">link</a>'
-        issues = check_structure(html, page_url="https://myweb.cz/")
+        issues = check_structure(html, seo=True, page_url="https://myweb.cz/")
         self.assertTrue(_has_issue(issues, IssueType.EXTERNAL_LINK))
 
     def test_protocol_relative_same_domain_internal(self):
         html = '<h1>A</h1><a href="//www.myweb.cz/page">link</a>'
-        issues = check_structure(html, page_url="https://myweb.cz/")
+        issues = check_structure(html, seo=True, page_url="https://myweb.cz/")
         self.assertFalse(_has_issue(issues, IssueType.EXTERNAL_LINK))
 
     def test_uppercase_scheme_external_detected(self):
         html = '<h1>A</h1><a href="HTTPS://other.com/page">link</a>'
-        issues = check_structure(html, page_url="https://myweb.cz/")
+        issues = check_structure(html, seo=True, page_url="https://myweb.cz/")
         self.assertTrue(_has_issue(issues, IssueType.EXTERNAL_LINK))
 
 
@@ -566,7 +566,7 @@ class TestCanonical(unittest.TestCase):
 
     def _check(self, head, page_url=PAGE):
         html = f"<html><head><title>T</title>{head}</head><body><h1>x</h1></body></html>"
-        return check_structure(html, page_url=page_url)
+        return check_structure(html, seo=True, page_url=page_url)
 
     def test_missing_canonical(self):
         issues = self._check("")
@@ -637,7 +637,7 @@ class TestOpenGraph(unittest.TestCase):
     def _check(self, head_extra: str):
         html = (f"<html lang='cs'><head><title>T</title>{head_extra}</head>"
                 "<body><h1>x</h1></body></html>")
-        return _get_issue(check_structure(html, page_url=self.PAGE), IssueType.MISSING_OG)
+        return _get_issue(check_structure(html, seo=True, page_url=self.PAGE), IssueType.MISSING_OG)
 
     def test_all_missing(self):
         issue = self._check("")
@@ -668,7 +668,7 @@ class TestOpenGraph(unittest.TestCase):
 class TestImageDimensions(unittest.TestCase):
     def _check(self, body: str):
         html = f"<html lang='cs'><head><title>T</title></head><body><h1>x</h1>{body}</body></html>"
-        return _get_issue(check_structure(html, page_url="https://example.cz/"),
+        return _get_issue(check_structure(html, seo=True, page_url="https://example.cz/"),
                           IssueType.IMG_NO_DIMENSIONS)
 
     def test_missing_dimensions_listed(self):

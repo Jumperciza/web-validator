@@ -230,11 +230,13 @@ def _fmt_duration(seconds: float) -> str:
 
 
 def validate_pages(pages: list, jar_path: str = "", start_url: str = "",
-                   delay: float | None = None) -> list:
+                   delay: float | None = None, seo: bool = False) -> list:
     """
     Stáhne, zvaliduje (W3C) a zkontroluje (struktura) všechny stránky.
     `delay` = pauza mezi requesty jednoho workeru při stahování; None =
     výchozí FETCH_DELAY (stejná hodnota jako `--delay` u crawleru).
+    `seo`   = zapnout SEO modul (`--seo`): kontroly z `issues.SEO_ISSUE_TYPES`,
+    duplicitní <title> napříč webem a délky title/description na homepage.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -334,7 +336,7 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "",
 
         def _run_struct():
             try:
-                struct_res[0] = check_structure(html_text, page_url=url)
+                struct_res[0] = check_structure(html_text, page_url=url, seo=seo)
             except Exception as e:
                 struct_res[0] = []
                 gray(f"  (chyba struktura: {e})"); print()
@@ -349,7 +351,7 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "",
         # někde uprostřed nebo úplně chyběla.
         homepage_meta = []
         try:
-            if _is_audit_root(url, start_url):
+            if seo and _is_audit_root(url, start_url):
                 homepage_meta = check_homepage_meta(html_text)
         except Exception as e:
             homepage_meta = [f"Chyba při kontrole meta: {e}"]
@@ -403,7 +405,7 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "",
 
     # Kontrola napříč webem – musí proběhnout před tiskem, aby
     # [STRUKTURA: N problémů] u každé stránky už duplicitní title zahrnoval.
-    n_dup_titles = mark_duplicate_titles(results)
+    n_dup_titles = mark_duplicate_titles(results) if seo else 0
     if n_dup_titles:
         noun = ("titulek" if n_dup_titles == 1
                 else "titulky" if n_dup_titles < 5 else "titulků")
@@ -431,11 +433,12 @@ def validate_pages(pages: list, jar_path: str = "", start_url: str = "",
     return results
 
 
-def run_link_checks(results: list, url: str, check_external: bool = False) -> dict:
+def run_link_checks(results: list, url: str, check_external: bool = False,
+                    seo: bool = False) -> dict:
     """
     Fáze [LINKS]: ověří dostupnost interních odkazů a obrázků (HEAD),
     postiženým stránkám přidá Issue (viz links_check) a vypíše souhrn.
-    Vrací link_report pro Excel a JSON.
+    Vrací link_report pro Excel a JSON. Příliš velké obrázky jen s `seo`.
     """
     info("  [LINKS]")
     print(" Ověřuji odkazy a obrázky"
@@ -446,7 +449,7 @@ def run_link_checks(results: list, url: str, check_external: bool = False) -> di
             write(f"\r  Ověřeno: {done}/{total}   ")
 
     report = check_resources(results, url, check_external=check_external,
-                             on_progress=_progress)
+                             on_progress=_progress, seo=seo)
     PHASE_TIMES["odkazy"] = report.get("elapsed", 0.0)
     if report["checked_links"] + report["checked_images"]:
         print()
@@ -478,7 +481,8 @@ def run_link_checks(results: list, url: str, check_external: bool = False) -> di
         if n_img_large:  parts.append(f"{n_img_large} nad {IMAGE_MAX_KB} kB")
         warn(f"  [!] Obrázky: {', '.join(parts)}"); print()
     else:
-        ok("  [✓]"); print(f" Obrázky v pořádku ({report['checked_images']} ověřeno)")
+        ok("  [✓]"); print(f" Obrázky v pořádku ({report['checked_images']} ověřeno"
+                           + ("" if seo else "; velikost jen s --seo") + ")")
 
     redirects = report.get("redirects") or []
     if redirects:
@@ -690,6 +694,12 @@ def main():
     parser.add_argument("--check-external", action="store_true",
                         help="Ověřit i odkazy a obrázky na cizích doménách "
                              "(výchozí: jen interní – rychlejší)")
+    parser.add_argument("--seo", action="store_true",
+                        help="Zapnout SEO kontroly: meta description, canonical, "
+                             "Open Graph, alt texty, rozměry a velikost obrázků, "
+                             "noopener, pořadí nadpisů, duplicitní <title>, délka "
+                             "title/description na homepage (výchozí: vypnuto – "
+                             "hlídají se jen W3C, testovací obsah a dostupnost)")
     parser.add_argument("--json", metavar="CESTA",
                         help="Kam uložit JSON výsledek: soubor .json nebo adresář "
                              "(výchozí: vedle Excel reportu, <host>_validator.json)")
@@ -700,7 +710,7 @@ def main():
     exclude = parse_exclude_patterns(args.exclude)
 
     # ── Banner ───────────────────────────────────────────────────────────────
-    print_banner()
+    print_banner(seo=args.seo)
 
     # ── Java check ───────────────────────────────────────────────────────────
     # Tichý při OK / unknown — varuje jen pokud Java chybí nebo je < 11.
@@ -914,9 +924,16 @@ def main():
 
     # ── Validace stránek ─────────────────────────────────────────────────────
     info("--- VALIDACE + KONTROLA HTML START ---")
-    ok(f" ({len(pages)} stránek)"); print("\n")
+    ok(f" ({len(pages)} stránek)"); print()
+    if args.seo:
+        gray("  (SEO kontroly zapnuté: meta description, canonical, Open Graph, alt, "
+             "rozměry a velikost obrázků, noopener, nadpisy, duplicitní <title>)")
+    else:
+        gray("  (SEO kontroly vypnuté – zapni přepínačem --seo)")
+    print("\n")
 
-    results = validate_pages(pages, jar_path=jar, start_url=url, delay=args.delay)
+    results = validate_pages(pages, jar_path=jar, start_url=url, delay=args.delay,
+                             seo=args.seo)
 
     # ── Sitemap hygiena (neexistující / přesměrované URL) ────────────────────
     sitemap_report = build_sitemap_report(sm_pages, results)
@@ -942,7 +959,8 @@ def main():
     # Přidává Issue do výsledků → musí běžet PŘED výpočtem skóre.
     link_report = None
     try:
-        link_report = run_link_checks(results, url, check_external=args.check_external)
+        link_report = run_link_checks(results, url, check_external=args.check_external,
+                                      seo=args.seo)
     except KeyboardInterrupt:
         raise
     except Exception as e:
@@ -960,7 +978,8 @@ def main():
         previous = load_previous(find_previous_json(json_path))
         if previous:
             comparison = compare_runs(previous,
-                                      build_json(results, url, link_report=link_report))
+                                      build_json(results, url, link_report=link_report,
+                                                 seo=args.seo))
     except Exception as e:
         gray(f"  (porovnání s minulým během se nepodařilo: {e})"); print()
 
@@ -973,7 +992,8 @@ def main():
                                   domain_info=domain_info,
                                   link_report=link_report,
                                   comparison=comparison,
-                                  sitemap_report=sitemap_report)
+                                  sitemap_report=sitemap_report,
+                                  seo=args.seo)
         if saved_path != output_path:
             warn(f"  [!] Soubor {output_path.name} je otevřený v jiném programu – "
                  f"report uložen jako {saved_path.name}"); print()
@@ -989,7 +1009,8 @@ def main():
                                           domain_info=domain_info,
                                           link_report=link_report,
                                           comparison=comparison,
-                                          sitemap_report=sitemap_report), json_path)
+                                          sitemap_report=sitemap_report,
+                                          seo=args.seo), json_path)
     except Exception as e:
         err(f"  [✗] Chyba při ukládání JSON: {e}"); print()
         json_path = None

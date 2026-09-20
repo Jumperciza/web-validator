@@ -10,6 +10,7 @@ Běží až po stažení všech stránek (main.py, fáze [LINKS]):
        • BROKEN_LINK   – interní odkaz vrací 404 / 5xx / je nedostupný
        • IMG_BROKEN    – obrázek vrací 404 / je nedostupný
        • IMG_TOO_LARGE – obrázek má Content-Length nad IMAGE_MAX_KB
+                         (SEO modul – jen s `--seo`)
      Interní odkazy, které vedou přes přesměrování (301/302), se jen
      zaznamenají do reportu (`redirects`) – nepenalizují se, ale odkaz má
      správně mířit rovnou na cílovou URL.
@@ -243,10 +244,13 @@ def check_resources(results: list, base_url: str, check_external: bool = False,
                     workers: int = CRAWL_WORKERS, timeout: float = DEFAULT_TIMEOUT,
                     on_progress=None,
                     max_targets: int | None = None,
-                    max_seconds: float | None = None) -> dict:
+                    max_seconds: float | None = None,
+                    seo: bool = False) -> dict:
     """
     Ověří odkazy a obrázky ze všech stránek v `results` (klíč "refs" z
     extract_refs) a postiženým stránkám přidá Issue do "structure_issues".
+    seo=False (výchozí) = příliš velké obrázky (IMG_TOO_LARGE) se nehlásí
+    ani v "images" – patří do SEO modulu (`--seo`); nedostupné obrázky vždy.
 
     Vrací report pro Excel / JSON:
       {
@@ -437,7 +441,7 @@ def check_resources(results: list, base_url: str, check_external: bool = False,
             label = f"{target_url[k]} ({_status_label(info)})"
             for src in sources:
                 page_img_broken[src].append(label)
-        elif info["size"] is not None and info["size"] > max_bytes:
+        elif seo and info["size"] is not None and info["size"] > max_bytes:
             image_problems.append({"url": target_url[k], "status": info["status"],
                                    "error": "", "size_kb": size_kb,
                                    "problem": "large", "sources": list(sources)})

@@ -223,7 +223,8 @@ class TestCheckResources(unittest.TestCase):
                                                 "https://example.cz/ok.jpg"]})]
         report, _ = self._run(results, {"https://example.cz/404.png": (404, None),
                                         "https://example.cz/big.jpg": (200, 700 * 1024),
-                                        "https://example.cz/ok.jpg": (200, 10 * 1024)})
+                                        "https://example.cz/ok.jpg": (200, 10 * 1024)},
+                              seo=True)
         problems = {im["url"]: im for im in report["images"]}
         self.assertEqual(problems["https://example.cz/404.png"]["problem"], "broken")
         self.assertEqual(problems["https://example.cz/big.jpg"]["problem"], "large")
@@ -235,6 +236,19 @@ class TestCheckResources(unittest.TestCase):
         large = next(i for i in results[0]["structure_issues"] if i.type == IssueType.IMG_TOO_LARGE)
         self.assertEqual(large.items, ["https://example.cz/big.jpg (700 kB)"])
         self.assertEqual(report["checked_images"], 3)
+
+    def test_large_images_only_with_seo(self):
+        """Bez --seo se velké obrázky nehlásí (SEO modul); nedostupné ano."""
+        results = [_page(BASE, refs={"images": ["https://example.cz/404.png",
+                                                "https://example.cz/big.jpg"]})]
+        report, _ = self._run(results, {"https://example.cz/404.png": (404, None),
+                                        "https://example.cz/big.jpg": (200, 700 * 1024)})
+        self.assertEqual([im["url"] for im in report["images"]],
+                         ["https://example.cz/404.png"])
+        types = {i.type for i in results[0]["structure_issues"]}
+        self.assertIn(IssueType.IMG_BROKEN, types)
+        self.assertNotIn(IssueType.IMG_TOO_LARGE, types)
+        self.assertEqual(report["checked_images"], 2)
 
     def test_network_error_counts_as_broken(self):
         results = [_page(BASE, refs={"links": ["https://example.cz/timeout"]})]
@@ -500,7 +514,9 @@ class TestExcelLinksImagesComparison(unittest.TestCase):
                                         "aborted": "15 síťových chyb za sebou – výpadek",
                                         "check_external": False})
         self.assertIn("✓ Všechny interní odkazy fungují (12 ověřeno)", vals)
-        self.assertIn("✓ Žádné nedostupné ani příliš velké obrázky (3 ověřeno)", vals)
+        self.assertIn("✓ Žádné nedostupné obrázky (3 ověřeno)", vals)
+        self.assertTrue(any(v == "OBRÁZKY – NEDOSTUPNÉ" for v in vals))
+        self.assertTrue(any("SEO kontroly" in v and "--seo" in v for v in vals))
         self.assertTrue(any("7 externích cílů nebylo ověřeno" in v for v in vals))
         self.assertTrue(any("120 URL s parametry" in v for v in vals))
         self.assertTrue(any("30 cílů nad limit" in v for v in vals))
@@ -519,7 +535,8 @@ class TestExcelLinksImagesComparison(unittest.TestCase):
             "checked_links": 2, "checked_images": 2, "known_ok": 0,
             "skipped_external": 0, "check_external": True,
         }
-        vals = self._write(link_report=report)
+        vals = self._write(link_report=report, seo=True)
+        self.assertFalse(any("SEO kontroly" in v and "vypnuté" in v for v in vals))
         self.assertIn("https://example.cz/mrtva", vals)              # http → https
         self.assertIn("HTTP 404", vals)
         self.assertIn("https://jinde.cz/x  [externí]", vals)

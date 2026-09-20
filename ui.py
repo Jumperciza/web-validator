@@ -241,28 +241,39 @@ def prompt_url() -> str:
 
 # ── Banner ───────────────────────────────────────────────────────────────────
 
-def print_banner() -> None:
-    """Úvodní banner při spuštění."""
+def print_banner(seo: bool = False) -> None:
+    """Úvodní banner při spuštění. `seo` = běží s přepínačem --seo."""
     print()
     info("=" * 62); print()
     print("  ", end=""); bold("Web Validator"); gray("  |  vytvořil Péťa"); print()
     info("=" * 62); print()
     print("  ", end=""); bold("Co kontroluje:"); print()
     print("    ", end=""); ok("1."); print(" W3C validace HTML (přes lokální vnu.jar)")
-    print("    ", end=""); ok("2."); print(" Struktura HTML:")
-    for item in ["existence a duplikáty <h1>",
-                 "pořadí nadpisů (žádné přeskočení)",
-                 "prázdné tagy", "duplicitní ID", "meta description",
-                 "alt texty u obrázků", "HTTP odkazy (místo HTTPS)",
-                 "externí odkazy bez target/_blank/noopener",
-                 "testovací/zástupný obsah (lorem ipsum, asdf…)",
-                 "lang atribut na <html>", "meta viewport",
-                 "noindex meta tag (mimo dev domény)",
+    print("    ", end=""); ok("2."); print(" Testovací / zástupný obsah:")
+    for item in ["lorem ipsum, asdf, TODO…", "výchozí title / description / alt",
+                 "placeholder obrázky, {{ šablonové proměnné }}, undefined / NaN",
+                 "výpisy PHP chyb, výchozí texty CMS"]:
+        gray(f"       - {item}"); print()
+    print("    ", end=""); ok("3."); print(" Dostupnost:")
+    for item in ["nefunkční odkazy a obrázky (404), přesměrování",
+                 "soft 404, test vlastní 404 stránky, prázdné odkazy (href=\"#\")",
+                 "neexistující / přesměrované URL v sitemap.xml", "bot ochrana (Anubis…)"]:
+        gray(f"       - {item}"); print()
+    print("    ", end=""); ok("4."); print(" Struktura HTML:")
+    for item in ["<h1>, <title>, lang, viewport, prázdné tagy, duplicitní ID",
+                 "HTTP odkazy (místo HTTPS), noindex mimo dev domény",
                  "URL ukazující na staging/dev domény (canonical, og:image, src…)"]:
         gray(f"       - {item}"); print()
-    print("    ", end=""); ok("3."); print(" Meta title a description délka (jen homepage)")
-    print("    ", end=""); ok("4."); print(" Kontrola robots.txt – Disallow: / a blokování CSS/JS pro Googlebot")
-    print("    ", end=""); ok("5."); print(" Kontrola existence uživatelské sekce (/uzivatel/)")
+    print("    ", end=""); ok("5."); print(" robots.txt (Disallow: /, blokování CSS/JS) a uživatelská sekce (/uzivatel/)")
+    print("    ", end="")
+    if seo:
+        ok("6."); print(" SEO (zapnuto --seo):")
+        for item in ["meta description, canonical, Open Graph, duplicitní <title>",
+                     "alt texty, rozměry a velikost obrázků, noopener, pořadí nadpisů",
+                     "délka title / description na homepage"]:
+            gray(f"       - {item}"); print()
+    else:
+        gray("6."); gray(" SEO kontroly (meta description, canonical, OG, alt…) – vypnuté, zapni --seo"); print()
     info("=" * 62); print()
     print()
 

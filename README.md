@@ -1,6 +1,8 @@
 # 🔍 Web Validator
 
-Nástroj pro automatizovaný technický audit webu. Zadáš URL, program projde celý web a vygeneruje přehledný Excel report.
+Nástroj pro automatizovaný technický audit webu – hlavně pro **výstupní kontrolu před předáním**. Zadáš URL, program projde celý web a vygeneruje přehledný Excel report.
+
+Tři věci, na které se soustředí: **1. W3C validace**, **2. testovací / zástupný obsah** (lorem ipsum, `{{ proměnné }}`, výchozí texty…), **3. dostupnost** (nefunkční odkazy a obrázky, soft 404, sitemap). SEO kontroly (meta description, canonical, Open Graph, alt texty…) jsou ve výchozím stavu **vypnuté** a zapínají se přepínačem `--seo`.
 
 ---
 
@@ -12,38 +14,43 @@ Každá stránka prochází lokální validací přes `vnu.jar` (offline, žádn
 Excel navíc obsahuje tabulku **„Nejčastější W3C chyby“** – stejné chyby ze všech stránek seskupené podle textu (bez čísla řádku): text chyby × počet stránek × počet výskytů × ukázková stránka (odkaz na validator.w3.org). U webů ze šablony tak hned vidíš, že např. 381 stránek s chybou = 2 chyby v šabloně. Zobrazuje se max 30 nejčastějších chyb; varování se neagregují.
 
 ### 2. Struktura HTML
-Na každé stránce se kontroluje 19 věcí (+ 1 napříč webem):
+Na každé stránce se kontroluje 19 věcí (+ 1 napříč webem). Řádky označené **SEO** se hlásí jen s přepínačem `--seo` (viz **SEO modul** níž):
 
 | Co se kontroluje | Popis |
 |---|---|
 | `<h1>` existence a unikátnost | Každá stránka by měla mít právě jeden H1 |
-| Pořadí nadpisů | Nesmí se přeskakovat úrovně (H1 → H3 bez H2) |
+| Pořadí nadpisů **(SEO)** | Nesmí se přeskakovat úrovně (H1 → H3 bez H2) |
 | Prázdné tagy | `<div>`, `<p>`, `<span>` a další bez obsahu |
 | Duplicitní ID | Stejné `id` atributy na více prvcích |
-| Meta description | Musí existovat a nesmí být prázdná |
-| Alt texty u obrázků | Každý `<img>` musí mít `alt` atribut |
+| Meta description **(SEO)** | Musí existovat a nesmí být prázdná |
+| Alt texty u obrázků **(SEO)** | Každý `<img>` musí mít `alt` atribut (chybějící `alt` hlásí i W3C validace) |
 | HTTP odkazy | Odhalí nezabezpečené `http://` odkazy |
-| Externí odkazy | Musí mít `target="_blank"` a `rel="noopener"` |
+| Externí odkazy **(SEO)** | Musí mít `target="_blank"` a `rel="noopener"` |
 | Testovací obsah | Detekuje lorem ipsum, asdf, qwerty a další zástupné texty – viz **Detekce testovacího obsahu** níž |
 | `lang` atribut | `<html lang="cs">` je důležitý pro SEO a čtečky obrazovky |
 | Meta viewport | Bez něj se stránka na mobilech zobrazuje špatně |
 | `noindex` meta tag | Detekuje `<meta name="robots" content="noindex">` na produkci |
 | Staging/dev URL v HTML | Detekuje canonical/og:image/odkazy ukazující na dev domény |
-| `<title>` | Musí existovat a nesmí být prázdný (na každé stránce, délka se hlídá jen na homepage) |
-| Canonical | `<link rel="canonical">` musí existovat, mířit sám na sebe a nebýt `http://` na https webu |
-| Open Graph | `og:title`, `og:description`, `og:image` (absolutní URL) – bez nich sdílení na Facebooku/LinkedInu nemá náhled |
-| Rozměry obrázků | `<img>` bez `width`/`height` (nebo obojího v inline `style`) → posun layoutu při načítání (CLS) |
+| `<title>` | Musí existovat a nesmí být prázdný (na každé stránce; délka se hlídá jen na homepage a jen s `--seo`) |
+| Canonical **(SEO)** | `<link rel="canonical">` musí existovat, mířit sám na sebe a nebýt `http://` na https webu |
+| Open Graph **(SEO)** | `og:title`, `og:description`, `og:image` (absolutní URL) – bez nich sdílení na Facebooku/LinkedInu nemá náhled |
+| Rozměry obrázků **(SEO)** | `<img>` bez `width`/`height` (nebo obojího v inline `style`) → posun layoutu při načítání (CLS) |
 | Soft 404 | Stránka vrací HTTP 200, ale `<title>`/`<h1>` hlásí „Stránka nenalezena“, „404“, „Page not found“ – Google ji indexuje jako běžnou stránku. Posuzuje se jen titulek/nadpis (článek „Jak nastavit 404 stránku“ se nehlásí) |
 | Prázdné odkazy | `<a href="#">Text</a>`, `href=""`, `javascript:void(0)` **bez** jakéhokoli JS „háčku“ (class, id, data-*, role, aria-*, onclick…) = nedodělaný odkaz. Ovladače menu/modalů a odkazy jen s obrázkem se nehlásí |
-| Duplicitní `<title>` *(napříč webem)* | Stejný titulek na více stránkách – v reportu jeden řádek na každý duplicitní titulek |
+| Duplicitní `<title>` *(napříč webem)* **(SEO)** | Stejný titulek na více stránkách – v reportu jeden řádek na každý duplicitní titulek |
 
 > ⚠️ **Noindex check** je přeskočen pro dev/staging domény (`*.cz.dev.poski.com`, `*.poskireal.cz`), kde je `noindex` záměrný. Stejně tak **canonical check** – na dev/lokálním webu canonical běžně (a správně) míří na produkci.
 
 > ⚠️ **Staging URL check** prochází `<a>`, `<img>`, `<script>`, `<link>` (canonical, alternate), `<iframe>`, `<video>`, `<form action>`, Open Graph (`og:image`, `og:url`), Twitter Cards a další. Stejně jako noindex je přeskočen pro dev domény.
 
-### 3. Meta údaje homepage
-- **Title:** 30–60 znaků
-- **Meta description:** 70–160 znaků
+### 3. SEO modul (`--seo`)
+Nástroj slouží k výstupní kontrole – jestli web *funguje* a není v něm testovací obsah. SEO kvalita je jiná disciplína (a typicky ji hlídají samostatné testy), proto jsou SEO kontroly **ve výchozím stavu vypnuté** a zapínají se `--seo`:
+
+- meta description (existence, prázdná), canonical (chybí / míří jinam / `http://`), Open Graph, duplicitní `<title>` napříč webem,
+- `alt` texty, `<img>` bez rozměrů, obrázky nad 500 kB, externí odkazy bez `target="_blank" rel="noopener"`, pořadí nadpisů,
+- **Meta údaje homepage** – délka `<title>` 30–60 znaků a meta description 70–160 znaků.
+
+Bez `--seo` se tyto kontroly ani nehlásí, ani nepočítají do skóre; v souhrnu Excelu i v terminálu je jen poznámka, že jsou vypnuté. S `--seo` mají v Excelu vlastní sekci „SEO – souhrn problémů“ (+ „Meta – homepage“) a vstupují do skóre. Které typy patří do SEO modulu, určuje jediná množina `issues.SEO_ISSUE_TYPES`. Když se porovnává s minulým během a jen jeden z běhů měl `--seo`, SEO problémy se v porovnání ignorují (jinak by „přibyly“ nebo „zmizely“ bez změny na webu).
 
 ### 4. robots.txt – kontrola indexace
 - **Kritická kontrola:** detekuje `Disallow: /` pro Googlebot nebo `*` — to znamená že je celý web zablokovaný pro vyhledávače. Klasický staging artefakt který se zapomene změnit při nasazení na produkci.
@@ -68,7 +75,7 @@ Po stažení všech stránek se z jejich HTML posbírají všechny `<a href>`, `
 
 - **Nefunkční odkazy** – interní odkaz vrací 404 / 5xx nebo je nedostupný. V reportu sekce „Nefunkční odkazy“: cíl → status → na kterých stránkách odkaz je.
 - **Nedostupné obrázky** – `src` vrací 404 / je nedostupný.
-- **Příliš velké obrázky** – `Content-Length` nad 500 kB (`config.IMAGE_MAX_KB`).
+- **Příliš velké obrázky** *(jen s `--seo`)* – `Content-Length` nad 500 kB (`config.IMAGE_MAX_KB`).
 - **Odkazy přes přesměrování** *(informativně, bez vlivu na skóre)* – interní odkaz vrací 301/302. První HEAD jde bez follow, u 3xx se dojde na konec; v reportu je tabulka „odkaz → kam“ a stránky, kde odkaz je. Přesměrování jen kvůli `http→https`, `www.` nebo koncovému lomítku jsou označená jako kosmetická a řazená až pod ostatní. Odkaz má mířit rovnou na cílovou URL.
 
 > ⚠️ Cizí domény se ve výchozím stavu **neověřují** (u velkého webu jde o stovky serverů, které navíc často blokují HEAD od botů). Zapíná se přes `--check-external`; i pak se u externích cílů 401/403/405/429/999 nebere jako „nefunkční“ – to jen znamená, že server bota nepustil.
@@ -88,7 +95,7 @@ Když audit vychází ze sitemapy, po stažení stránek se zvlášť vypíše, 
 
 Skóre se počítá **váhově** — ne všechny problémy mají stejnou závažnost.
 
-**Princip:** každá stránka začíná na 100 bodech. Za každý problém se odečítá podle typu a počtu. Celkové skóre webu = průměr skóre všech stránek.
+**Princip:** každá stránka začíná na 100 bodech. Za každý problém se odečítá podle typu a počtu. Celkové skóre webu = průměr skóre všech stránek. Problémy ze SEO modulu (v tabulkách označené **SEO**) se počítají jen s `--seo` – bez něj je skóre čistě z jádra (W3C, testovací obsah, dostupnost, struktura).
 
 ### Kritické problémy (binární — buď jsou, nebo nejsou)
 
@@ -101,20 +108,20 @@ Skóre se počítá **váhově** — ne všechny problémy mají stejnou závaž
 | Výchozí text CMS / šablony („Hello world!“, „Text odstavce“…) | **−15** |
 | Chybí `<h1>` | **−15** |
 | Chybí / prázdný `<title>` | **−15** |
-| Chybí meta description | **−15** |
-| Prázdná meta description | **−15** |
+| Chybí meta description **(SEO)** | **−15** |
+| Prázdná meta description **(SEO)** | **−15** |
 | Chybí meta viewport | **−15** |
 | Chybí `lang` atribut na `<html>` | **−10** |
 | Soft 404 – „Stránka nenalezena“ s HTTP 200 | **−10** |
 | JavaScriptové hodnoty v textu (`undefined Kč`, `null`, `NaN`, `[object Object]`) | **−10** |
 | Výchozí text v `<title>` / description / `alt` / `og:*` („Document“, `alt="image"`) | **−10** |
-| Canonical míří na jinou URL (nebo je jich víc) | **−10** |
+| Canonical míří na jinou URL (nebo je jich víc) **(SEO)** | **−10** |
 | Duplicitní `<h1>` | **−8** |
-| Canonical používá `http://` na https stránce | **−8** |
-| Přeskočení úrovně nadpisů | **−5** |
-| Duplicitní `<title>` (každá z postižených stránek) | **−5** |
-| Chybí canonical | **−3** |
-| Chybí Open Graph meta (`og:title` / `og:description` / `og:image`) | **−3** |
+| Canonical používá `http://` na https stránce **(SEO)** | **−8** |
+| Přeskočení úrovně nadpisů **(SEO)** | **−5** |
+| Duplicitní `<title>` (každá z postižených stránek) **(SEO)** | **−5** |
+| Chybí canonical **(SEO)** | **−3** |
+| Chybí Open Graph meta (`og:title` / `og:description` / `og:image`) **(SEO)** | **−3** |
 
 ### Počítané problémy (penalizace škáluje s počtem, ale s cap)
 
@@ -124,13 +131,13 @@ Skóre se počítá **váhově** — ne všechny problémy mají stejnou závaž
 | Nefunkční odkazy (404 / nedostupné) | −3 | −15 |
 | Duplicitní ID | −3 | −15 |
 | Nedostupné obrázky (404) | −2 | −10 |
-| Příliš velké obrázky (nad 500 kB) | −2 | −10 |
+| Příliš velké obrázky (nad 500 kB) **(SEO)** | −2 | −10 |
 | HTTP odkazy (mixed content) | −2 | −15 |
-| Chybějící alt texty | −1.5 | −15 |
+| Chybějící alt texty **(SEO)** | −1.5 | −15 |
 | Prázdné odkazy (`href="#"`, `href=""`, `javascript:void(0)`) | −1 | −5 |
 | Prázdné tagy | −0.5 | −8 |
-| Externí odkazy bez `target/noopener` | −0.5 | −6 |
-| Obrázky bez `width`/`height` | −0.5 | −5 |
+| Externí odkazy bez `target/noopener` **(SEO)** | −0.5 | −6 |
+| Obrázky bez `width`/`height` **(SEO)** | −0.5 | −5 |
 
 ### W3C chyby
 
@@ -202,6 +209,9 @@ python main.py https://example.cz/ --exclude "/blog/*" --exclude "/en/*" --keep
 # CI / kontrola před nasazením: exit kód 1 když je skóre pod 80
 python main.py https://example.cz/ --no-interactive --fail-under 80 --output reporty/
 
+# Zapnout i SEO kontroly (meta description, canonical, OG, alt, rozměry obrázků…)
+python main.py https://www.example.cz/ --seo
+
 # Ověřit i odkazy a obrázky na cizích doménách, JSON uložit jinam
 python main.py https://example.cz/ --check-external --json vysledky/
 ```
@@ -218,6 +228,7 @@ python main.py https://example.cz/ --check-external --json vysledky/
 | `--keep` | — | Nepřepisovat starý report – do jména se přidá časová značka |
 | `--fail-under N` | — | Exit kód 1, když je Web Quality Score < N (0–100) |
 | `--check-external` | — | Ověřit i odkazy a obrázky na cizích doménách (výchozí: jen interní) |
+| `--seo` | — | Zapnout SEO modul: meta description, canonical, Open Graph, alt texty, rozměry a velikost obrázků, noopener, pořadí nadpisů, duplicitní `<title>`, délka title/description homepage (výchozí: vypnuto) |
 | `--json CESTA` | `<stejně jako Excel>.json` | Kam uložit JSON výsledek – soubor `.json` nebo adresář |
 | `--no-update-check` | — | Přeskočí kontrolu verze vnu.jar |
 | `--no-interactive` | — | Žádné interaktivní dotazy |
@@ -231,7 +242,7 @@ python main.py https://example.cz/ --check-external --json vysledky/
 
 ## 📈 JSON výstup a porovnání s minulým během
 
-Vedle Excelu se **vždy** uloží i `<host>_validator.json` (stejné jméno, i s časovou značkou při `--keep`; `--json CESTA` jen změní umístění). Obsahuje kompletní výsledek: skóre, souhrn, každou stránku s jejím skóre, strukturálními problémy (`Issue.to_dict()`) a W3C zprávami, nefunkční odkazy, obrázky, robots.txt a `/uzivatel/`. Hodí se pro napojení na cokoliv dalšího (CI, dashboard, vlastní skripty).
+Vedle Excelu se **vždy** uloží i `<host>_validator.json` (stejné jméno, i s časovou značkou při `--keep`; `--json CESTA` jen změní umístění). Obsahuje kompletní výsledek: skóre, souhrn, každou stránku s jejím skóre, strukturálními problémy (`Issue.to_dict()`) a W3C zprávami, nefunkční odkazy, obrázky, robots.txt, `/uzivatel/` a příznak `seo` (běželo s `--seo`). Hodí se pro napojení na cokoliv dalšího (CI, dashboard, vlastní skripty).
 
 Při dalším běhu na stejnou doménu se minulý JSON načte (výchozí soubor, nebo nejnovější `_YYYYMMDD_HHMMSS` verze vedle něj) a v terminálu, v souhrnu Excelu i v JSON (`comparison`) se ukáže:
 
@@ -277,7 +288,7 @@ V závěrečném souhrnu je řádek `Doba fází : stažení 41s | validace 3s |
 ├── report_json.py      ← JSON výstup + porovnání s minulým během
 ├── updater.py          ← Aktualizace vnu.jar z GitHubu
 ├── colors.py           ← Barevný terminál
-├── tests/              ← Unit testy (366 testů)
+├── tests/              ← Unit testy (387 testů)
 │   ├── test_structure_check.py
 │   ├── test_other.py
 │   ├── test_network_checks.py
@@ -295,7 +306,7 @@ V závěrečném souhrnu je řádek `Doba fází : stažení 41s | validace 3s |
 python -m unittest discover tests/
 ```
 
-366 testů pokrývá všechny HTML kontroly (včetně noindex, staging URL, title, canonical, Open Graph a rozměrů obrázků), detekci testovacího obsahu (všech 6 skupin, včetně testů na falešné poplachy u běžného českého textu), dostupnost (soft 404 včetně falešných poplachů typu „404 m²“, prázdné odkazy vs. JS ovladače, test vlastní 404 stránky, detekci bot ochrany Anubis/Cloudflare, sitemap hygienu), kontrolu odkazů a obrázků (mockované HEAD requesty, přesměrování, externí cíle, velikost, slučování URL s parametry, limit cílů, časový rozpočet, pojistka proti výpadku sítě), JSON export a porovnání s minulým během, CLI přepínače (`--exclude`, `--output`/`--keep`, `--fail-under` exit kódy), URL validaci, statistiky a agregaci W3C chyb, robots.txt parser (včetně detekce Disallow: /), sitemap parser (včetně `.xml.gz`), crawler (filtry, deduplikace, robots.txt, hybrid režim), detekci `/uzivatel/` (soft 404, přesměrování), kódování stažených stránek, zamčený Excel soubor a obsah vygenerovaného Excel reportu.
+387 testů pokrývá všechny HTML kontroly (včetně noindex, staging URL, title, canonical, Open Graph a rozměrů obrázků), SEO modul za `--seo` (výchozí stav bez SEO nálezů, skóre jen z jádra, sekce v Excelu, porovnání běhů s různým režimem), detekci testovacího obsahu (všech 6 skupin, včetně testů na falešné poplachy u běžného českého textu), dostupnost (soft 404 včetně falešných poplachů typu „404 m²“, prázdné odkazy vs. JS ovladače, test vlastní 404 stránky, detekci bot ochrany Anubis/Cloudflare, sitemap hygienu), kontrolu odkazů a obrázků (mockované HEAD requesty, přesměrování, externí cíle, velikost, slučování URL s parametry, limit cílů, časový rozpočet, pojistka proti výpadku sítě), JSON export a porovnání s minulým během, CLI přepínače (`--exclude`, `--output`/`--keep`, `--fail-under` exit kódy), URL validaci, statistiky a agregaci W3C chyb, robots.txt parser (včetně detekce Disallow: /), sitemap parser (včetně `.xml.gz`), crawler (filtry, deduplikace, robots.txt, hybrid režim), detekci `/uzivatel/` (soft 404, přesměrování), kódování stažených stránek, zamčený Excel soubor a obsah vygenerovaného Excel reportu.
 
 ---
 
@@ -303,13 +314,13 @@ python -m unittest discover tests/
 
 Report se ukládá do složky `excel reporty/`. Obsahuje:
 
-1. **Souhrn** – Web Quality Score + přehled počtů (+ změna skóre od minulého běhu); při zablokování bot ochranou červené varování „AUDIT NENÍ PLATNÝ“ hned pod nadpisem
+1. **Souhrn** – Web Quality Score + přehled počtů (+ změna skóre od minulého běhu); při zablokování bot ochranou červené varování „AUDIT NENÍ PLATNÝ“ hned pod nadpisem; bez `--seo` poznámka, že SEO kontroly jsou vypnuté
 2. **Změny od minulého běhu** – nové a opravené problémy (jen když existuje minulý JSON)
-3. **Meta homepage** – délka title a description
-4. **W3C validace** – nejčastější chyby napříč webem (text × počet stránek × ukázka) a pak stránky s problémy jako klikatelné odkazy
-5. **HTML struktura** – problémy seskupené podle typu
+3. **W3C validace** – nejčastější chyby napříč webem (text × počet stránek × ukázka) a pak stránky s problémy jako klikatelné odkazy
+4. **HTML struktura** – problémy jádra seskupené podle typu
+5. **SEO** *(jen s `--seo`)* – SEO problémy seskupené podle typu + **Meta – homepage** (délka title a description)
 6. **Nefunkční odkazy** – cíl → status → stránky, kde odkaz je; pod tím odkazy vedoucí přes přesměrování (odkaz → kam)
-7. **Obrázky** – nedostupné nebo větší než 500 kB
+7. **Obrázky** – nedostupné (s `--seo` i větší než 500 kB)
 8. **Nedostupné stránky** – s chybovou hláškou (včetně stránek zablokovaných bot ochranou)
 9. **Sitemap.xml** – neexistující / přesměrované URL (jen u auditů ze sitemapy)
 10. **robots.txt** – Disallow: / a blokování JS/CSS
