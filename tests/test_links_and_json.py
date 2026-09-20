@@ -93,7 +93,11 @@ class TestProbeUrl(unittest.TestCase):
         s = MagicMock()
         s.head.return_value = _resp(200, {"Content-Length": "2048"})
         info = probe_url(s, "https://example.cz/a.png")
-        self.assertEqual(info, {"status": 200, "size": 2048, "error": ""})
+        self.assertEqual(info, {"status": 200, "size": 2048, "error": "",
+                                "redirect": "", "redirect_status": 0})
+        # bez přesměrování = jediný HEAD request (bez follow)
+        s.head.assert_called_once()
+        self.assertFalse(s.head.call_args.kwargs.get("allow_redirects"))
         s.get.assert_not_called()
 
     def test_head_405_falls_back_to_get(self):

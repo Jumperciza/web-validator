@@ -12,7 +12,7 @@ Každá stránka prochází lokální validací přes `vnu.jar` (offline, žádn
 Excel navíc obsahuje tabulku **„Nejčastější W3C chyby“** – stejné chyby ze všech stránek seskupené podle textu (bez čísla řádku): text chyby × počet stránek × počet výskytů × ukázková stránka (odkaz na validator.w3.org). U webů ze šablony tak hned vidíš, že např. 381 stránek s chybou = 2 chyby v šabloně. Zobrazuje se max 30 nejčastějších chyb; varování se neagregují.
 
 ### 2. Struktura HTML
-Na každé stránce se kontroluje 17 věcí (+ 1 napříč webem):
+Na každé stránce se kontroluje 19 věcí (+ 1 napříč webem):
 
 | Co se kontroluje | Popis |
 |---|---|
@@ -33,6 +33,8 @@ Na každé stránce se kontroluje 17 věcí (+ 1 napříč webem):
 | Canonical | `<link rel="canonical">` musí existovat, mířit sám na sebe a nebýt `http://` na https webu |
 | Open Graph | `og:title`, `og:description`, `og:image` (absolutní URL) – bez nich sdílení na Facebooku/LinkedInu nemá náhled |
 | Rozměry obrázků | `<img>` bez `width`/`height` (nebo obojího v inline `style`) → posun layoutu při načítání (CLS) |
+| Soft 404 | Stránka vrací HTTP 200, ale `<title>`/`<h1>` hlásí „Stránka nenalezena“, „404“, „Page not found“ – Google ji indexuje jako běžnou stránku. Posuzuje se jen titulek/nadpis (článek „Jak nastavit 404 stránku“ se nehlásí) |
+| Prázdné odkazy | `<a href="#">Text</a>`, `href=""`, `javascript:void(0)` **bez** jakéhokoli JS „háčku“ (class, id, data-*, role, aria-*, onclick…) = nedodělaný odkaz. Ovladače menu/modalů a odkazy jen s obrázkem se nehlásí |
 | Duplicitní `<title>` *(napříč webem)* | Stejný titulek na více stránkách – v reportu jeden řádek na každý duplicitní titulek |
 
 > ⚠️ **Noindex check** je přeskočen pro dev/staging domény (`*.cz.dev.poski.com`, `*.poskireal.cz`), kde je `noindex` záměrný. Stejně tak **canonical check** – na dev/lokálním webu canonical běžně (a správně) míří na produkci.
@@ -51,12 +53,23 @@ Na každé stránce se kontroluje 17 věcí (+ 1 napříč webem):
 ### 5. Uživatelská sekce
 Testuje jestli existuje `/uzivatel/`.
 
+### 5b. Test vlastní 404 stránky
+Jeden GET na náhodnou neexistující URL (`/wv-neexistujici-stranka-…/`). Správně má web vrátit **HTTP 404** (nebo 410). Hlásí se:
+- **HTTP 200** – soft 404: každá překlepnutá URL vypadá pro Google jako platná stránka (když stránka zároveň zobrazuje text „Stránka nenalezena“, je jen špatně stavový kód).
+- **Přesměrování na homepage** (301/302 → `/`) – totéž, jen skrytěji.
+- **5xx** – chyba serveru pro neexistující URL.
+Přesměrování na vlastní 404 stránku, která 404 vrátí, je v pořádku.
+
+### 5c. Bot ochrana (Anubis, Cloudflare, …)
+PoskiREAL weby mají ochranu **Anubis**, která podezřelým klientům vrátí místo obsahu ověřovací stránku „Making sure you're not a bot!“ (s HTTP 200). Validátor proto posílá poctivý User-Agent bez „Mozilla“ (`WebValidator/1.0 (+github…)`) a `Accept-Language`, aby projel. Když se ověřovací stránka přece vrátí (Anubis, Cloudflare „Just a moment…“, DDoS-Guard, Incapsula, Sucuri…), pozná se **před** W3C validací: stránka se nevaliduje, hlásí se jako nedostupná a v terminálu i na začátku Excelu je červené **„AUDIT NENÍ PLATNÝ“** s počtem zablokovaných stránek. Bez toho by se validovalo 400× stejné challenge HTML a report by vypadal věrohodně, ale byl by nesmysl.
+
 ### 6. Odkazy a obrázky (fáze `[LINKS]`)
 Po stažení všech stránek se z jejich HTML posbírají všechny `<a href>`, `<img src>` / `data-src` a `og:image`, deduplikují se napříč webem a ověří HEAD requestem (cíle, které jsou samy auditované stránky, se znovu neověřují):
 
 - **Nefunkční odkazy** – interní odkaz vrací 404 / 5xx nebo je nedostupný. V reportu sekce „Nefunkční odkazy“: cíl → status → na kterých stránkách odkaz je.
 - **Nedostupné obrázky** – `src` vrací 404 / je nedostupný.
 - **Příliš velké obrázky** – `Content-Length` nad 500 kB (`config.IMAGE_MAX_KB`).
+- **Odkazy přes přesměrování** *(informativně, bez vlivu na skóre)* – interní odkaz vrací 301/302. První HEAD jde bez follow, u 3xx se dojde na konec; v reportu je tabulka „odkaz → kam“ a stránky, kde odkaz je. Přesměrování jen kvůli `http→https`, `www.` nebo koncovému lomítku jsou označená jako kosmetická a řazená až pod ostatní. Odkaz má mířit rovnou na cílovou URL.
 
 > ⚠️ Cizí domény se ve výchozím stavu **neověřují** (u velkého webu jde o stovky serverů, které navíc často blokují HEAD od botů). Zapíná se přes `--check-external`; i pak se u externích cílů 401/403/405/429/999 nebere jako „nefunkční“ – to jen znamená, že server bota nepustil.
 
@@ -65,6 +78,9 @@ Po stažení všech stránek se z jejich HTML posbírají všechny `<a href>`, `
 - Ověřuje se **max 1 500 cílů** (`LINK_CHECK_MAX_TARGETS`, přednost mají ty s nejvíc výskyty) a fáze má **časový rozpočet 10 min** (`LINK_CHECK_MAX_SECONDS`). Co se nestihne, je v reportu „neověřeno“, ne „nefunkční“.
 - **Pojistka proti výpadku sítě:** DNS / connection chyba u vlastní domény webu se nikdy nehlásí jako nefunkční odkaz, a po 15 síťových chybách za sebou (`LINK_CHECK_ABORT_AFTER`) se fáze přeruší – nic z toho neovlivní skóre. Bez toho by výpadek Wi-Fi uprostřed běhu znamenal tisíce falešných 404.
 - HEAD requesty jedou přes keep-alive spojení (jedno DNS + TLS na worker, ne na request).
+
+### 7. Hygiena sitemap.xml
+Když audit vychází ze sitemapy, po stažení stránek se zvlášť vypíše, co v ní nemá být: URL vracející **HTTP 4xx/5xx** („neexistuje – odstranit ze sitemapy“), URL, které se **přesměrovávají** jinam (do sitemapy patří cílová URL), a URL nedostupné kvůli síťové chybě. Sekce se v Excelu objeví jen u auditů ze sitemapy.
 
 ---
 
@@ -89,6 +105,7 @@ Skóre se počítá **váhově** — ne všechny problémy mají stejnou závaž
 | Prázdná meta description | **−15** |
 | Chybí meta viewport | **−15** |
 | Chybí `lang` atribut na `<html>` | **−10** |
+| Soft 404 – „Stránka nenalezena“ s HTTP 200 | **−10** |
 | JavaScriptové hodnoty v textu (`undefined Kč`, `null`, `NaN`, `[object Object]`) | **−10** |
 | Výchozí text v `<title>` / description / `alt` / `og:*` („Document“, `alt="image"`) | **−10** |
 | Canonical míří na jinou URL (nebo je jich víc) | **−10** |
@@ -110,6 +127,7 @@ Skóre se počítá **váhově** — ne všechny problémy mají stejnou závaž
 | Příliš velké obrázky (nad 500 kB) | −2 | −10 |
 | HTTP odkazy (mixed content) | −2 | −15 |
 | Chybějící alt texty | −1.5 | −15 |
+| Prázdné odkazy (`href="#"`, `href=""`, `javascript:void(0)`) | −1 | −5 |
 | Prázdné tagy | −0.5 | −8 |
 | Externí odkazy bez `target/noopener` | −0.5 | −6 |
 | Obrázky bez `width`/`height` | −0.5 | −5 |
@@ -194,7 +212,7 @@ python main.py https://example.cz/ --check-external --json vysledky/
 |---|---|---|
 | `url` | *(ptá se)* | URL webu k auditu |
 | `--max-pages` | `500` | Maximální počet stránek |
-| `--delay` | `1.0` | Pauza mezi dávkami crawleru (s) |
+| `--delay` | `1.0` / `0.5` | Pauza mezi requesty (s) – platí pro crawler (výchozí 1.0) i stahování stránek (výchozí 0.5, `config.FETCH_DELAY`). Na lokálním hostu se pauzy nepoužijí |
 | `--exclude VZOR` | — | Vynechá URL odpovídající glob vzoru (`/blog/*`, `*.pdf`, `https://ex.cz/en/*`). Lze opakovat nebo oddělit čárkou; platí pro sitemap i crawler |
 | `--output CESTA` | `excel reporty/<host>_validator.xlsx` | Soubor `.xlsx`, nebo adresář (v něm výchozí jméno) |
 | `--keep` | — | Nepřepisovat starý report – do jména se přidá časová značka |
@@ -253,12 +271,13 @@ V závěrečném souhrnu je řádek `Doba fází : stažení 41s | validace 3s |
 ├── content_check.py    ← Detekce testovacího obsahu (6 skupin, volá structure_check)
 ├── validator_w3c.py    ← W3C validace (server + subprocess)
 ├── robots_check.py     ← robots.txt + /uzivatel/
-├── links_check.py      ← Dostupnost odkazů a obrázků (404, velikost)
+├── links_check.py      ← Dostupnost odkazů a obrázků (404, velikost, přesměrování)
+├── availability_check.py ← Soft 404, test vlastní 404 stránky, detekce bot ochrany
 ├── report_excel.py     ← Generování Excel reportu
 ├── report_json.py      ← JSON výstup + porovnání s minulým během
 ├── updater.py          ← Aktualizace vnu.jar z GitHubu
 ├── colors.py           ← Barevný terminál
-├── tests/              ← Unit testy (315 testů)
+├── tests/              ← Unit testy (366 testů)
 │   ├── test_structure_check.py
 │   ├── test_other.py
 │   ├── test_network_checks.py
@@ -276,7 +295,7 @@ V závěrečném souhrnu je řádek `Doba fází : stažení 41s | validace 3s |
 python -m unittest discover tests/
 ```
 
-315 testů pokrývá všechny HTML kontroly (včetně noindex, staging URL, title, canonical, Open Graph a rozměrů obrázků), detekci testovacího obsahu (všech 6 skupin, včetně testů na falešné poplachy u běžného českého textu), kontrolu odkazů a obrázků (mockované HEAD requesty, externí cíle, velikost, slučování URL s parametry, limit cílů, časový rozpočet, pojistka proti výpadku sítě), JSON export a porovnání s minulým během, CLI přepínače (`--exclude`, `--output`/`--keep`, `--fail-under` exit kódy), URL validaci, statistiky a agregaci W3C chyb, robots.txt parser (včetně detekce Disallow: /), sitemap parser (včetně `.xml.gz`), crawler (filtry, deduplikace, robots.txt, hybrid režim), detekci `/uzivatel/` (soft 404, přesměrování), kódování stažených stránek, zamčený Excel soubor a obsah vygenerovaného Excel reportu.
+366 testů pokrývá všechny HTML kontroly (včetně noindex, staging URL, title, canonical, Open Graph a rozměrů obrázků), detekci testovacího obsahu (všech 6 skupin, včetně testů na falešné poplachy u běžného českého textu), dostupnost (soft 404 včetně falešných poplachů typu „404 m²“, prázdné odkazy vs. JS ovladače, test vlastní 404 stránky, detekci bot ochrany Anubis/Cloudflare, sitemap hygienu), kontrolu odkazů a obrázků (mockované HEAD requesty, přesměrování, externí cíle, velikost, slučování URL s parametry, limit cílů, časový rozpočet, pojistka proti výpadku sítě), JSON export a porovnání s minulým během, CLI přepínače (`--exclude`, `--output`/`--keep`, `--fail-under` exit kódy), URL validaci, statistiky a agregaci W3C chyb, robots.txt parser (včetně detekce Disallow: /), sitemap parser (včetně `.xml.gz`), crawler (filtry, deduplikace, robots.txt, hybrid režim), detekci `/uzivatel/` (soft 404, přesměrování), kódování stažených stránek, zamčený Excel soubor a obsah vygenerovaného Excel reportu.
 
 ---
 
@@ -284,16 +303,18 @@ python -m unittest discover tests/
 
 Report se ukládá do složky `excel reporty/`. Obsahuje:
 
-1. **Souhrn** – Web Quality Score + přehled počtů (+ změna skóre od minulého běhu)
+1. **Souhrn** – Web Quality Score + přehled počtů (+ změna skóre od minulého běhu); při zablokování bot ochranou červené varování „AUDIT NENÍ PLATNÝ“ hned pod nadpisem
 2. **Změny od minulého běhu** – nové a opravené problémy (jen když existuje minulý JSON)
 3. **Meta homepage** – délka title a description
 4. **W3C validace** – nejčastější chyby napříč webem (text × počet stránek × ukázka) a pak stránky s problémy jako klikatelné odkazy
 5. **HTML struktura** – problémy seskupené podle typu
-6. **Nefunkční odkazy** – cíl → status → stránky, kde odkaz je
+6. **Nefunkční odkazy** – cíl → status → stránky, kde odkaz je; pod tím odkazy vedoucí přes přesměrování (odkaz → kam)
 7. **Obrázky** – nedostupné nebo větší než 500 kB
-8. **Nedostupné stránky** – s chybovou hláškou
-9. **robots.txt** – Disallow: / a blokování JS/CSS
-10. **Uživatelská sekce** – status `/uzivatel/`
+8. **Nedostupné stránky** – s chybovou hláškou (včetně stránek zablokovaných bot ochranou)
+9. **Sitemap.xml** – neexistující / přesměrované URL (jen u auditů ze sitemapy)
+10. **robots.txt** – Disallow: / a blokování JS/CSS
+11. **Test 404 stránky** – jak web odpoví na neexistující URL
+12. **Uživatelská sekce** – status `/uzivatel/`
 
 Vedle Excelu vzniká i JSON se stejným jménem (viz výše).
 

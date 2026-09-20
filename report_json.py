@@ -44,7 +44,8 @@ def _page_key(url: str) -> str:
 
 def build_json(results: list, start_url: str, source_label: str = "",
                domain_info: dict | None = None, link_report: dict | None = None,
-               comparison: dict | None = None, generated_at: datetime | None = None) -> dict:
+               comparison: dict | None = None, generated_at: datetime | None = None,
+               sitemap_report: dict | None = None) -> dict:
     """Sestaví serializovatelný dict z výsledků auditu."""
     stats = compute_stats(results)
     domain_info = domain_info or {}
@@ -60,6 +61,9 @@ def build_json(results: list, start_url: str, source_label: str = "",
             "score":         round(page_score(r)),
             "w3c_category":  r.get("w3c_category", ""),
             "w3c_error_msg": r.get("w3c_error_msg", "") or "",
+            "http_status":   r.get("http_status", 0) or 0,
+            "final_url":     r.get("final_url", "") or "",
+            "bot_challenge": r.get("bot_challenge", "") or "",
             "w3c_errors":    _messages(r.get("w3c_errors") or []),
             "w3c_warnings":  _messages(r.get("w3c_warnings") or []),
             "issues":        issues,
@@ -84,6 +88,8 @@ def build_json(results: list, start_url: str, source_label: str = "",
         "pages":        pages,
         "broken_links": link_report.get("broken_links", []),
         "images":       link_report.get("images", []),
+        "redirects":    link_report.get("redirects", []),
+        "sitemap":      sitemap_report,
         "links_summary": {
             "checked_links":    link_report.get("checked_links", 0),
             "checked_images":   link_report.get("checked_images", 0),
@@ -100,6 +106,7 @@ def build_json(results: list, start_url: str, source_label: str = "",
             "robots_issues":  domain_info.get("robots_issues", []),
             "robots_skipped": domain_info.get("robots_skipped", False),
             "user_pages":     domain_info.get("user_pages", []),
+            "not_found":      domain_info.get("not_found"),
         },
         "comparison":   comparison,
     }

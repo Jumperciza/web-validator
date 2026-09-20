@@ -5,9 +5,11 @@ Všechny "magic numbers" jsou zde — snadné úpravy a konzistentní chování.
 """
 
 # ── HTTP identifikace ────────────────────────────────────────────────────────
-# Záměrně BEZ "Mozilla": bot ochrana Anubis (PoskiREAL weby) dává každému UA
-# s "Mozilla" stránku "Making sure you're not a bot!" místo obsahu. Poctivý
-# bot UA bez Mozilla projde (2026-09-20 ověřeno na nadin-reality.cz).
+# Záměrně BEZ "Mozilla": bot ochrana Anubis (PoskiREAL weby) dává UA
+# s "Mozilla" bez hlavičky Accept-Language stránku "Making sure you're not
+# a bot!" místo obsahu (2026-09-20 ověřeno na nadin-reality.cz). Poctivý bot
+# UA projde vždy; Accept-Language posíláme všude jako druhou pojistku.
+# Když se challenge přece vrátí, pozná ji availability_check.detect_bot_challenge.
 USER_AGENT      = "WebValidator/1.0 (+https://github.com/Jumperciza/web-validator)"
 ACCEPT_LANGUAGE = "cs-CZ,cs;q=0.9,en;q=0.8"
 

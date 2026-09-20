@@ -23,9 +23,13 @@ Prováděné kontroly:
   15. <link rel="canonical"> – existuje, míří sám na sebe, není http:// na https
   16. Open Graph meta (og:title, og:description, og:image) pro sdílení na sítích
   17. <img> bez width/height (prohlížeč nezná rozměry → posun layoutu, CLS)
+  18. Soft 404 – <title>/<h1> hlásí „Stránka nenalezena“, ale HTTP je 200
+      (detekci má availability_check.py)
+  19. Prázdné odkazy s textem (href="#", href="", javascript:void(0)) bez
+      JS ovladače – nedodělané odkazy
 
 Napříč webem (po zpracování všech stránek, viz `mark_duplicate_titles`):
-  18. Duplicitní <title> na více stránkách
+  20. Duplicitní <title> na více stránkách
 
 Dostupnost odkazů a obrázků (404, velikost) řeší links_check.py – potřebuje
 síťové requesty, proto neběží tady.
@@ -45,6 +49,7 @@ from bs4 import BeautifulSoup
 
 from config import (META_TITLE_MIN, META_TITLE_MAX, META_DESC_MIN, META_DESC_MAX,
                     SKIP_NOINDEX_PATTERNS, STAGING_DOMAIN_PATTERNS)
+from availability_check import detect_soft_404
 from content_check import check_test_content
 from issues import Issue, IssueType
 from ui import is_local_url
@@ -556,7 +561,73 @@ def check_structure(html: str, page_url: str = "") -> List[Issue]:
             count=len(no_dims),
         ))
 
+    # 18. Soft 404 — stránka se načetla (HTTP 200), ale <title>/<h1> říká
+    # „Stránka nenalezena“. Skutečné 404 sem nedojdou (validator_error).
+    soft_404 = detect_soft_404(soup)
+    if soft_404:
+        issues.append(Issue(
+            type=IssueType.SOFT_404,
+            items=[soft_404],
+            detail=soft_404,
+        ))
+
+    # 19. Prázdné odkazy — <a href="#">Text</a> bez jakéhokoli JS „háčku“
+    # (class, id, data-*, role, aria-*, onclick…) je nedodělaný odkaz.
+    empty_links = _find_empty_links(soup)
+    if empty_links:
+        issues.append(Issue(
+            type=IssueType.EMPTY_HREF,
+            items=empty_links[:50],
+            count=len(empty_links),
+        ))
+
     return issues
+
+
+# href hodnoty, které nikam nevedou. „#neco“ je kotva – ta je v pořádku.
+_EMPTY_HREFS = {"", "#", "#!", "javascript:", "javascript:;", "javascript:void(0)",
+                "javascript:void(0);", "javascript:void 0", "javascript:void 0;",
+                "javascript://", "javascript:false"}
+
+# Atributy, které naznačují, že odkaz ovládá JavaScript (dropdown, modal,
+# tab, slider…) – takový <a href="#"> je legitimní ovladač, ne díra.
+_JS_HOOK_ATTR_PREFIXES = ("data-", "aria-", "on", "v-", "x-", "ng-", "@", ":", "hx-")
+_JS_HOOK_ATTRS = {"role", "class", "id", "tabindex"}
+
+
+def _find_empty_links(soup: BeautifulSoup) -> list[str]:
+    """
+    Vrátí popisky odkazů s textem, které nikam nevedou (href="#", "",
+    javascript:void(0)) a nemají nic, čím by je mohl chytit JavaScript.
+    Odkazy jen s obrázkem (galerie, lightbox) a odkazy, které rozbalují
+    podmenu (mají sourozence <ul>), se nehlásí.
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+    for a in soup.find_all("a"):
+        href = a.get("href")
+        if href is None:
+            continue                      # <a name="…"> / kotva bez href
+        href_norm = " ".join(href.split()).lower()
+        if href_norm not in _EMPTY_HREFS:
+            continue
+        text = " ".join(a.get_text(" ", strip=True).split())
+        if not text:
+            continue                      # jen ikona / obrázek → typicky JS ovladač
+        if any(k in _JS_HOOK_ATTRS or k.lower().startswith(_JS_HOOK_ATTR_PREFIXES)
+               for k in a.attrs if k != "href"):
+            continue
+        if a.find_next_sibling("ul") is not None or a.find_next_sibling("ol") is not None:
+            continue                      # rodič rozbalovacího menu
+        parent = a.parent
+        if parent is not None and parent.name == "li" and parent.find(["ul", "ol"]) is not None:
+            continue
+        shown = text[:60] + "…" if len(text) > 60 else text
+        entry = f'„{shown}“  (href="{href.strip()}")'
+        if entry not in seen:
+            seen.add(entry)
+            found.append(entry)
+    return found
 
 
 _OG_REQUIRED = ("og:title", "og:description", "og:image")

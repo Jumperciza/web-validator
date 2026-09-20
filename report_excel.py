@@ -1,4 +1,4 @@
-"""Excel report – jeden list s přehledem, W3C, strukturou, odkazy/obrázky, robots.txt, uživatelskou sekcí."""
+"""Excel report – jeden list s přehledem, W3C, strukturou, odkazy/obrázky, sitemapou, robots.txt, testem 404, uživatelskou sekcí."""
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -125,8 +125,25 @@ def _write_header(ws, start_url: str, source_label: str) -> int:
 
 
 def _write_summary(ws, row: int, score: int, stats, http_converted: bool = False,
-                   comparison: dict | None = None) -> int:
+                   comparison: dict | None = None,
+                   bot_blocked: tuple[int, str] | None = None) -> int:
     _title_row(ws, row, "SOUHRN", SUB); row += 1
+
+    # Bot ochrana vrátila ověřovací stránky → audit není platný. Musí být
+    # první věc, kterou člověk v reportu uvidí.
+    if bot_blocked and bot_blocked[0]:
+        n, names = bot_blocked
+        ws.merge_cells(f"A{row}:G{row}")
+        cell = ws.cell(row=row, column=1,
+                       value=f"⛔ AUDIT NENÍ PLATNÝ – bot ochrana ({names}) vrátila u {n} "
+                             f"z {stats.total} stránek ověřovací stránku místo obsahu. "
+                             f"Tyto stránky se nevalidovaly; povolte User-Agent nástroje "
+                             f"v nastavení ochrany a audit spusťte znovu.")
+        cell.font = Font(name="Arial", bold=True, color=R_FT, size=11)
+        cell.fill = _fill(R_BG); cell.alignment = Alignment(horizontal="left",
+                                                            vertical="center", wrap_text=True)
+        cell.border = _brd()
+        ws.row_dimensions[row].height = 42; row += 1
 
     if score >= 0:
         sc_bg, sc_ft = _score_palette(score)
@@ -174,6 +191,8 @@ def _write_summary(ws, row: int, score: int, stats, http_converted: bool = False
                       stats.w3c_skipped, GR_BG, GR_FT))
     if stats.w3c_failed:
         cards.append(("Nepodařilo načíst stránek", stats.w3c_failed, R_BG, R_FT))
+    if bot_blocked and bot_blocked[0]:
+        cards.append(("Zablokováno bot ochranou (stránek)", bot_blocked[0], R_BG, R_FT))
     if comparison:
         n_fixed = comparison.get("fixed_count", 0)
         n_new   = comparison.get("new_count", 0)
@@ -585,9 +604,60 @@ def _write_links_section(ws, row: int, link_report: dict | None) -> int:
             ws.row_dimensions[row].height = max(18, 15 * min(len(srcs), 8))
             row += 1
 
+    row = _write_redirects(ws, row, link_report.get("redirects") or [])
+
     for note in _link_notes(link_report):
         ws.merge_cells(f"A{row}:G{row}")
         ws.cell(row=row, column=1, value=note)
+        ws.cell(row=row, column=1).font = _bf(color=GR_FT, sz=9)
+        ws.row_dimensions[row].height = 16; row += 1
+    return row
+
+
+REDIRECTS_LIMIT = 60
+
+
+def _write_redirects(ws, row: int, redirects: list) -> int:
+    """
+    Interní odkazy vedoucí přes 301/302 – informativně (nepenalizuje se).
+    Nejdřív skutečné změny cíle, „kosmetické“ (http→https, www, lomítko)
+    až pod nimi šedě.
+    """
+    if not redirects:
+        return row
+    n_trivial = sum(1 for r in redirects if r.get("trivial"))
+    ws.merge_cells(f"A{row}:G{row}")
+    c = ws.cell(row=row, column=1,
+                value=f"ℹ Odkazy vedoucí přes přesměrování: {len(redirects)}"
+                      + (f" (z toho {n_trivial} jen http→https / www / koncové lomítko)"
+                         if n_trivial else "")
+                      + " – odkaz má mířit rovnou na cílovou URL")
+    c.font = _bf(color=B_FT, bold=True); c.fill = _fill(B_BG); c.border = _brd()
+    ws.row_dimensions[row].height = 20; row += 1
+
+    _hdr_row(ws, [("Odkaz v HTML", 80), ("HTTP", 12), ("→ Přesměrováno na", 46),
+                  ("Na stránkách", 40)], row=row, bg=SUB2)
+    ws.merge_cells(f"C{row}:F{row}")
+    for col in range(4, 7):
+        ws.cell(row=row, column=col).fill   = _fill(SUB2)
+        ws.cell(row=row, column=col).border = _brd()
+    row += 1
+    for r in redirects[:REDIRECTS_LIMIT]:
+        trivial = r.get("trivial")
+        bg, ft = (GR_BG, GR_FT) if trivial else (O_BG, O_FT)
+        _dc(ws, row, 1, _as_https(r["url"]), bg=bg, ft=ft)
+        _badge(ws, row, 2, str(r.get("status") or "3xx"), bg, ft)
+        ws.merge_cells(f"C{row}:F{row}")
+        _dc(ws, row, 3, r.get("to", ""))
+        srcs = r.get("sources", [])
+        _dc(ws, row, 7, _sources_cell(srcs, limit=5))
+        ws.row_dimensions[row].height = max(18, 15 * min(len(srcs), 5))
+        row += 1
+    if len(redirects) > REDIRECTS_LIMIT:
+        ws.merge_cells(f"A{row}:G{row}")
+        ws.cell(row=row, column=1,
+                value=f"… a dalších {len(redirects) - REDIRECTS_LIMIT} přesměrování "
+                      f"(zobrazeno {REDIRECTS_LIMIT}, kompletní seznam je v JSON)")
         ws.cell(row=row, column=1).font = _bf(color=GR_FT, sz=9)
         ws.row_dimensions[row].height = 16; row += 1
     return row
@@ -704,6 +774,109 @@ def _write_comparison_section(ws, row: int, comparison: dict | None, max_rows: i
                     value=f"   … a dalších {len(items) - max_rows} (kompletní seznam je v JSON)")
             ws.cell(row=row, column=1).font = _bf(color=GR_FT, sz=9)
             ws.row_dimensions[row].height = 16; row += 1
+    return row
+
+
+def _write_sitemap_section(ws, row: int, sitemap_report: dict | None) -> int:
+    """
+    Hygiena sitemap.xml: URL, které neexistují (404/410/5xx), jsou nedostupné
+    nebo se přesměrovávají. Sekce se vynechá, když sitemap nebyla použita.
+    """
+    if not sitemap_report:
+        return row
+    dead        = sitemap_report.get("dead", [])
+    unreachable = sitemap_report.get("unreachable", [])
+    redirected  = sitemap_report.get("redirected", [])
+    total       = sitemap_report.get("total", 0)
+
+    row = _spacer(ws, row)
+    _title_row(ws, row, "SITEMAP.XML – NEEXISTUJÍCÍ / PŘESMĚROVANÉ URL", SUB); row += 1
+
+    if not (dead or unreachable or redirected):
+        ws.merge_cells(f"A{row}:G{row}")
+        ws.cell(row=row, column=1,
+                value=f"✓ Všech {total} URL ze sitemapy existuje a nepřesměrovává se")
+        ws.cell(row=row, column=1).font = _bf(color=G_FT, bold=True)
+        ws.row_dimensions[row].height = 20
+        return row + 1
+
+    parts = []
+    if dead:        parts.append(f"{len(dead)} neexistujících (HTTP 4xx/5xx)")
+    if redirected:  parts.append(f"{len(redirected)} přesměrovaných")
+    if unreachable: parts.append(f"{len(unreachable)} nedostupných")
+    ws.merge_cells(f"A{row}:G{row}")
+    c = ws.cell(row=row, column=1,
+                value=f"Sitemap obsahuje {total} URL, z toho {', '.join(parts)} – "
+                      f"neexistující URL ze sitemapy odstranit, přesměrované nahradit cílovou URL")
+    c.font = _bf(color=O_FT, bold=True); c.fill = _fill(O_BG); c.border = _brd()
+    ws.row_dimensions[row].height = 20; row += 1
+
+    _hdr_row(ws, [("URL v sitemapě", 80), ("Stav", 12), ("Poznámka / cíl přesměrování", 86)],
+             row=row, bg=SUB2)
+    ws.merge_cells(f"C{row}:G{row}")
+    for col in range(4, 8):
+        ws.cell(row=row, column=col).fill   = _fill(SUB2)
+        ws.cell(row=row, column=col).border = _brd()
+    row += 1
+    for e in dead:
+        _dc(ws, row, 1, _as_https(e["url"]), bg=R_BG, ft=R_FT)
+        _badge(ws, row, 2, f"HTTP {e.get('status') or '?'}", R_BG, R_FT)
+        ws.merge_cells(f"C{row}:G{row}")
+        _dc(ws, row, 3, "neexistuje – odstranit ze sitemapy")
+        ws.row_dimensions[row].height = 18; row += 1
+    for e in redirected:
+        _dc(ws, row, 1, _as_https(e["url"]), bg=O_BG, ft=O_FT)
+        _badge(ws, row, 2, "301/302", O_BG, O_FT)
+        ws.merge_cells(f"C{row}:G{row}")
+        _dc(ws, row, 3, f"→ {e.get('to', '')}"
+                        + ("  (jen koncové lomítko / https / www)" if e.get("trivial") else ""))
+        ws.row_dimensions[row].height = 18; row += 1
+    for e in unreachable:
+        _dc(ws, row, 1, _as_https(e["url"]), bg=GR_BG, ft=GR_FT)
+        _badge(ws, row, 2, "CHYBA", GR_BG, GR_FT)
+        ws.merge_cells(f"C{row}:G{row}")
+        _dc(ws, row, 3, str(e.get("error") or "nedostupné")[:150])
+        ws.row_dimensions[row].height = 18; row += 1
+    return row
+
+
+def _write_not_found_section(ws, row: int, not_found: dict | None) -> int:
+    """Test vlastní 404 stránky: jak web odpoví na neexistující URL."""
+    row = _spacer(ws, row)
+    _title_row(ws, row, "NEEXISTUJÍCÍ STRÁNKA – TEST HTTP 404", SUB); row += 1
+
+    if not not_found:
+        ws.merge_cells(f"A{row}:G{row}")
+        ws.cell(row=row, column=1, value="Kontrola neproběhla nebo nedostupná")
+        ws.cell(row=row, column=1).font = _bf(color=GR_FT)
+        ws.row_dimensions[row].height = 18
+        return row + 1
+
+    verdict = not_found.get("verdict", "")
+    if verdict == "ok":
+        bg, ft, prefix = G_BG, G_FT, "✓ "
+    elif verdict in ("soft_404", "redirect_home", "redirect_200", "server_error"):
+        bg, ft, prefix = R_BG, R_FT, "⚠ "
+    else:
+        bg, ft, prefix = GR_BG, GR_FT, "ℹ "
+
+    ws.merge_cells(f"A{row}:G{row}")
+    c = ws.cell(row=row, column=1, value=prefix + (not_found.get("message") or ""))
+    c.font = _bf(color=ft, bold=(verdict != "ok")); c.fill = _fill(bg)
+    c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    c.border = _brd()
+    ws.row_dimensions[row].height = 34 if len(not_found.get("message") or "") > 110 else 20
+    row += 1
+
+    if not_found.get("url"):
+        detail = f"   ↳ testovaná URL: {not_found['url']}  (HTTP {not_found.get('status') or '–'}"
+        if not_found.get("final_url"):
+            detail += f" → {not_found['final_url']}  HTTP {not_found.get('final_status') or '–'}"
+        detail += ")"
+        ws.merge_cells(f"A{row}:G{row}")
+        ws.cell(row=row, column=1, value=detail)
+        ws.cell(row=row, column=1).font = _bf(color=GR_FT, sz=9)
+        ws.row_dimensions[row].height = 16; row += 1
     return row
 
 
@@ -836,13 +1009,15 @@ def write_report(results: list, output_path: Path, start_url: str,
                  score: int = -1, source_label: str = "",
                  domain_info: dict | None = None,
                  link_report: dict | None = None,
-                 comparison: dict | None = None) -> Path:
+                 comparison: dict | None = None,
+                 sitemap_report: dict | None = None) -> Path:
     """
     Generuje Excel report. Vrátí cestu k uloženému souboru – ta se může
     lišit od `output_path`, pokud byl původní soubor zamčený (viz _save_workbook).
 
-    link_report = výstup links_check.check_resources (None = sekce se vynechají)
-    comparison  = výstup report_json.compare_runs (None = bez porovnání)
+    link_report    = výstup links_check.check_resources (None = sekce se vynechají)
+    comparison     = výstup report_json.compare_runs (None = bez porovnání)
+    sitemap_report = výstup main.build_sitemap_report (None = sitemap nebyla)
     """
     if domain_info is None:
         domain_info = {}
@@ -851,6 +1026,11 @@ def write_report(results: list, output_path: Path, start_url: str,
     robots_issues  = domain_info.get("robots_issues", [])
     robots_skipped = domain_info.get("robots_skipped", False)
     user_pages     = domain_info.get("user_pages", [])
+    not_found      = domain_info.get("not_found")
+
+    blocked = [r for r in results if r.get("bot_challenge")]
+    bot_blocked = ((len(blocked), ", ".join(sorted({r["bot_challenge"] for r in blocked})))
+                   if blocked else None)
 
     is_local_audit = is_local_url(start_url)
 
@@ -876,7 +1056,7 @@ def write_report(results: list, output_path: Path, start_url: str,
 
     row = _write_header(ws, start_url, source_label)
     row = _write_summary(ws, row, score, stats, http_converted=http_converted,
-                         comparison=comparison)
+                         comparison=comparison, bot_blocked=bot_blocked)
     row = _write_comparison_section(ws, row, comparison)
     row = _write_homepage_meta(ws, row, results)
     row = _write_w3c_top_errors(ws, row, results, is_local_audit=is_local_audit)
@@ -885,7 +1065,9 @@ def write_report(results: list, output_path: Path, start_url: str,
     row = _write_links_section(ws, row, link_report)
     row = _write_images_section(ws, row, link_report)
     row = _write_failed_pages(ws, row, results)
+    row = _write_sitemap_section(ws, row, sitemap_report)
     row = _write_robots_section(ws, row, robots_issues, robots_skipped)
+    row = _write_not_found_section(ws, row, not_found)
     row = _write_user_pages(ws, row, user_pages, is_local_audit=is_local_audit)
 
     ws.freeze_panes = "A4"
