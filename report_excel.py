@@ -11,7 +11,7 @@ from config import IMAGE_MAX_KB, LINK_CHECK_MAX_TARGETS
 from issues import Issue
 from report_json import format_previous_date
 from robots_check import CRITICAL_PREFIX as ROBOTS_CRITICAL_PREFIX
-from stats  import compute_stats
+from stats  import compute_stats, aggregate_w3c_errors
 from ui     import is_local_url
 
 # ── Paleta ───────────────────────────────────────────────────────────────────
@@ -282,6 +282,78 @@ def _format_w3c_messages(warnings: list, errors: list, max_items: int = 30) -> s
         lines = lines[:max_items] + [f"… a dalších {rest} zpráv (oříznuto)"]
 
     return "\n".join(lines) if lines else ""
+
+
+W3C_TOP_ERRORS_LIMIT = 30   # max řádků v tabulce „Nejčastější W3C chyby“
+
+
+def _write_w3c_top_errors(ws, row: int, results: list, is_local_audit: bool = False) -> int:
+    """
+    Tabulka „Nejčastější W3C chyby“ – agregace přes celý web.
+
+    Jeden řádek = jeden text chyby (bez čísla řádku), počet stránek, počet
+    výskytů a jedna ukázková stránka. U veřejného webu je ukázka odkaz na
+    validator.w3.org (stejný formát jako v sekci níž – dá se rovnou kopírovat),
+    u lokálního auditu přímá URL stránky.
+
+    Sekce se vypíše jen když existuje alespoň jedna W3C chyba; stávající
+    sekce „stránky s problémy“ zůstává beze změny pod ní.
+    """
+    rows = aggregate_w3c_errors(results)
+    if not rows:
+        return row
+
+    row = _spacer(ws, row)
+    _title_row(ws, row, "W3C VALIDACE – NEJČASTĚJŠÍ CHYBY (napříč webem)", SUB); row += 1
+
+    # Layout: A = text chyby | B = stránek | C:D = výskytů | E:G = ukázka
+    _hdr_row(ws, [("Chyba (text z validátoru)", 80), ("Stránek", 12),
+                  ("Výskytů", 8)], row=row, bg=SUB2)
+    ws.merge_cells(f"C{row}:D{row}")
+    example_label = "Ukázková stránka" if is_local_audit else "Ukázka – W3C Validator URL"
+    c = ws.cell(row=row, column=5, value=example_label)
+    c.font = _hf(10); c.fill = _fill(SUB2); c.alignment = _al("center"); c.border = _brd()
+    ws.merge_cells(f"E{row}:G{row}")
+    for col in (4, 6, 7):
+        ws.cell(row=row, column=col).fill = _fill(SUB2)
+        ws.cell(row=row, column=col).border = _brd()
+    row += 1
+
+    shown = rows[:W3C_TOP_ERRORS_LIMIT]
+    for item in shown:
+        n   = item["pages"]
+        bg3 = O_BG if n <= 3 else R_BG
+        ft3 = O_FT if n <= 3 else R_FT
+        _dc(ws, row, 1, item["message"], sz=9)
+        _dc(ws, row, 2, n, bg=bg3, ft=ft3, align="center", bold=True)
+        ws.merge_cells(f"C{row}:D{row}")
+        _dc(ws, row, 3, item["occurrences"], align="center")
+        ws.cell(row=row, column=4).border = _brd()
+
+        if is_local_audit:
+            example = item["example_url"]
+        else:
+            example = _w3c_link(item["example_url"])
+        ws.merge_cells(f"E{row}:G{row}")
+        _dc(ws, row, 5, example, link=example, sz=9)
+        for col in (6, 7):
+            ws.cell(row=row, column=col).border = _brd()
+
+        # Výška podle délky textu chyby (sloupec A ≈ 95 znaků na řádek při 9 pt)
+        n_lines = max(1, -(-len(item["message"]) // 95))
+        ws.row_dimensions[row].height = max(18, 13 * n_lines + 5)
+        row += 1
+
+    if len(rows) > len(shown):
+        ws.merge_cells(f"A{row}:G{row}")
+        ws.cell(row=row, column=1,
+                value=f"… a dalších {len(rows) - len(shown)} různých chyb "
+                      f"(zobrazeno {len(shown)} nejčastějších)")
+        ws.cell(row=row, column=1).font = _bf(color=GR_FT)
+        ws.row_dimensions[row].height = 18
+        row += 1
+
+    return row
 
 
 def _write_w3c_section(ws, row: int, results: list, is_local_audit: bool = False) -> int:
@@ -807,6 +879,7 @@ def write_report(results: list, output_path: Path, start_url: str,
                          comparison=comparison)
     row = _write_comparison_section(ws, row, comparison)
     row = _write_homepage_meta(ws, row, results)
+    row = _write_w3c_top_errors(ws, row, results, is_local_audit=is_local_audit)
     row = _write_w3c_section(ws, row, results, is_local_audit=is_local_audit)
     row = _write_structure_section(ws, row, results)
     row = _write_links_section(ws, row, link_report)

@@ -181,3 +181,47 @@ def compute_stats(results: list) -> Stats:
     avg = sum(page_scores) / len(page_scores) if page_scores else 0.0
     s.score = max(0, min(100, round(avg)))
     return s
+
+# ── Agregace W3C chyb napříč webem ───────────────────────────────────────────
+
+def _normalize_w3c_message(item) -> str:
+    """Text W3C zprávy bez čísla řádku, s normalizovanými mezerami."""
+    msg = item if isinstance(item, str) else (item.get("message") or "")
+    return " ".join(str(msg).split())
+
+
+def aggregate_w3c_errors(results: list) -> list[dict]:
+    """
+    Seskupí W3C chyby ze všech stránek podle textu (bez čísla řádku).
+
+    Vrací seznam dictů seřazený od nejčastější chyby:
+        {"message": str,          # text chyby
+         "pages": int,            # na kolika stránkách se vyskytuje
+         "occurrences": int,      # celkový počet výskytů (i vícekrát na stránce)
+         "example_url": str}      # první stránka, kde se objevila
+
+    Smysl: u webů ze šablony se pár chyb opakuje na stovkách stránek –
+    tabulka „chyba × počet stránek“ řekne kodérovi, co opravit v šabloně,
+    aniž by procházel stránky jednu po druhé. Varování se neagregují
+    (jsou jen informativní).
+    """
+    pages:  dict[str, int] = {}
+    occurs: dict[str, int] = {}
+    example: dict[str, str] = {}
+
+    for r in results:
+        seen_here: set[str] = set()
+        for item in r.get("w3c_errors") or []:
+            msg = _normalize_w3c_message(item)
+            if not msg:
+                continue
+            occurs[msg] = occurs.get(msg, 0) + 1
+            if msg not in seen_here:
+                seen_here.add(msg)
+                pages[msg] = pages.get(msg, 0) + 1
+                example.setdefault(msg, r.get("url", ""))
+
+    rows = [{"message": m, "pages": pages[m], "occurrences": occurs[m],
+             "example_url": example[m]} for m in pages]
+    rows.sort(key=lambda x: (-x["pages"], -x["occurrences"], x["message"]))
+    return rows

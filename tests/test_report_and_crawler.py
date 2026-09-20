@@ -384,10 +384,61 @@ class TestWriteReportContent(unittest.TestCase):
         self.assertIn("VAROVÁNÍ", vals)
         self.assertIn("VAR+CHYBA", vals)
         links = [v for v in vals if v.startswith("https://validator.w3.org/nu/?doc=")]
-        self.assertEqual(len(links), 2)
+        # 2 stránky s problémy + 2 ukázky v tabulce nejčastějších chyb (e, e2)
+        self.assertEqual(len(links), 4)
         self.assertTrue(any("example.cz%2Fb" in l for l in links))
         # Detailní výpis chyb se u veřejného webu nezobrazuje
         self.assertFalse(any(v.startswith("[CHYBA") for v in vals))
+
+    def test_w3c_top_errors_table_public(self):
+        results = [
+            _page("https://example.cz/", "error",
+                  errors=[{"message": "Duplicate ID \"menu\".", "line": 1},
+                          {"message": "Duplicate ID \"menu\".", "line": 2}]),
+            _page("https://example.cz/a", "error",
+                  errors=[{"message": "Duplicate ID \"menu\".", "line": 5},
+                          {"message": "Stray end tag \"div\".", "line": 9}]),
+            _page("https://example.cz/b", "warning",
+                  warnings=[{"message": "Section lacks heading.", "line": 1}]),
+        ]
+        vals = self._write(results)
+        self.assertIn("W3C VALIDACE – NEJČASTĚJŠÍ CHYBY (napříč webem)", vals)
+        self.assertIn("Duplicate ID \"menu\".", vals)
+        self.assertIn("Stray end tag \"div\".", vals)
+        # Varování se neagregují
+        self.assertNotIn("Section lacks heading.", vals)
+        # Ukázka je W3C odkaz na první stránku s chybou
+        self.assertIn("https://validator.w3.org/nu/?doc=https%3A%2F%2Fexample.cz%2F", vals)
+        # Agregace (2 řádky) + stránky s problémy (3 řádky) = 5 W3C odkazů
+        links = [v for v in vals if v.startswith("https://validator.w3.org/nu/?doc=")]
+        self.assertEqual(len(links), 5)
+        # Pořadí buněk: text chyby → počet stránek → počet výskytů
+        i = vals.index("Duplicate ID \"menu\".")
+        self.assertEqual(vals[i + 1:i + 3], ["2", "3"])
+
+    def test_w3c_top_errors_absent_without_errors(self):
+        vals = self._write([_page("https://example.cz/", "warning",
+                                  warnings=[{"message": "w", "line": 1}])])
+        self.assertNotIn("W3C VALIDACE – NEJČASTĚJŠÍ CHYBY (napříč webem)", vals)
+
+    def test_w3c_top_errors_local_audit_uses_page_url(self):
+        results = [_page("http://localhost:8000/x", "error",
+                         errors=[{"message": "Bad thing.", "line": 7}])]
+        vals = self._write(results, start="http://localhost:8000/")
+        self.assertIn("W3C VALIDACE – NEJČASTĚJŠÍ CHYBY (napříč webem)", vals)
+        self.assertIn("Ukázková stránka", vals)
+        self.assertFalse(any("validator.w3.org" in v for v in vals))
+        self.assertEqual(vals.count("http://localhost:8000/x"), 2)   # ukázka + sekce stránek
+
+    def test_w3c_top_errors_truncated_to_limit(self):
+        from report_excel import W3C_TOP_ERRORS_LIMIT
+        errors = [{"message": f"Error {i:02d}", "line": i}
+                  for i in range(W3C_TOP_ERRORS_LIMIT + 5)]
+        vals = self._write([_page("https://example.cz/", "error", errors=errors)])
+        self.assertIn("Error 00", vals)
+        self.assertIn(f"Error {W3C_TOP_ERRORS_LIMIT - 1:02d}", vals)
+        self.assertNotIn(f"Error {W3C_TOP_ERRORS_LIMIT:02d}", vals)
+        self.assertTrue(any(v.startswith("… a dalších 5 různých chyb") for v in vals))
 
     def test_w3c_local_audit_shows_messages_instead_of_link(self):
         results = [_page("http://localhost:8000/a", "error",

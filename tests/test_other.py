@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from stats         import compute_stats
+from stats         import compute_stats, aggregate_w3c_errors
 from ui            import is_valid_url, normalize_url_input
 from robots_check  import (_parse_robots, _get_relevant_disallows,
                            CRITICAL_PREFIX)
@@ -137,6 +137,44 @@ class TestValidatorSkipped(unittest.TestCase):
         with patch.object(validator_w3c, "_server_port", 0):
             res = validator_w3c.validate(b"<html></html>", jar="fake.jar")
         self.assertEqual(res["category"], "skipped")
+
+
+class TestAggregateW3cErrors(unittest.TestCase):
+    def test_groups_by_text_ignores_line_and_whitespace(self):
+        results = [
+            {"url": "https://e.cz/", "w3c_errors": [
+                {"message": "Duplicate ID \"menu\".", "line": 10},
+                {"message": "Duplicate ID  \"menu\".", "line": 55},   # 2× na stránce
+                {"message": "Element \"p\" not allowed here.", "line": 3}]},
+            {"url": "https://e.cz/a", "w3c_errors": [
+                {"message": "Duplicate ID \"menu\".", "line": 99}]},
+            {"url": "https://e.cz/b", "w3c_errors": [], "w3c_category": "ok"},
+            {"url": "https://e.cz/c", "w3c_category": "validator_error"},   # bez klíče
+        ]
+        rows = aggregate_w3c_errors(results)
+        self.assertEqual(len(rows), 2)
+        top = rows[0]
+        self.assertEqual(top["message"], "Duplicate ID \"menu\".")
+        self.assertEqual(top["pages"], 2)
+        self.assertEqual(top["occurrences"], 3)
+        self.assertEqual(top["example_url"], "https://e.cz/")
+        self.assertEqual(rows[1]["pages"], 1)
+
+    def test_sort_pages_then_occurrences_then_text(self):
+        results = [
+            {"url": "u1", "w3c_errors": [{"message": "B", "line": 1},
+                                         {"message": "A", "line": 2},
+                                         {"message": "C", "line": 3},
+                                         {"message": "C", "line": 4}]},
+        ]
+        rows = aggregate_w3c_errors(results)
+        self.assertEqual([r["message"] for r in rows], ["C", "A", "B"])
+
+    def test_empty_and_plain_strings(self):
+        self.assertEqual(aggregate_w3c_errors([]), [])
+        rows = aggregate_w3c_errors([{"url": "u", "w3c_errors": ["Old format", {"message": ""}]}])
+        self.assertEqual(rows, [{"message": "Old format", "pages": 1,
+                                 "occurrences": 1, "example_url": "u"}])
 
 
 # ── UI (URL validace) ────────────────────────────────────────────────────────
