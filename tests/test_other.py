@@ -344,6 +344,23 @@ class TestHybridCrawl(unittest.TestCase):
         self.assertNotIn("https://example.cz/o-nas", found)
 
 
+class TestLoadDomains(unittest.TestCase):
+    def test_missing_file_gives_empty_lists(self):
+        from config import load_domains
+        self.assertEqual(load_domains(Path("neexistuje_domeny.txt")),
+                         {"dev": [], "robots": []})
+
+    def test_sections_and_comments(self):
+        import tempfile
+        from config import load_domains
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "domeny.txt"
+            p.write_text("# komentář\n[dev]\nDev.Firma.cz  # staging\n\n"
+                         "[robots]\nfirma.\n", encoding="utf-8")
+            self.assertEqual(load_domains(p),
+                             {"dev": ["dev.firma.cz"], "robots": ["firma."]})
+
+
 class TestAuditRoot(unittest.TestCase):
     def test_root_matches_variants(self):
         from main import _is_audit_root

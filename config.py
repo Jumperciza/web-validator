@@ -3,13 +3,13 @@ Sdílené konstanty napříč projektem.
 
 Všechny "magic numbers" jsou zde — snadné úpravy a konzistentní chování.
 """
+from pathlib import Path
 
 # ── HTTP identifikace ────────────────────────────────────────────────────────
-# Záměrně BEZ "Mozilla": bot ochrana Anubis dává UA
-# s "Mozilla" bez hlavičky Accept-Language stránku "Making sure you're not
-# a bot!" místo obsahu (2026-09-20 ověřeno na example.cz). Poctivý bot
-# UA projde vždy; Accept-Language posíláme všude jako druhou pojistku.
-# Když se challenge přece vrátí, pozná ji availability_check.detect_bot_challenge.
+# Bez "Mozilla": ochrana Anubis pustí UA s "Mozilla" a bez Accept-Language
+# jen na stránku "Making sure you're not a bot!". Poctivý bot UA projde,
+# Accept-Language posíláme jako druhou pojistku. Kdyby se ověřovací stránka
+# přece vrátila, pozná ji availability_check.detect_bot_challenge.
 USER_AGENT      = "WebValidator/1.0 (+https://github.com/Jumperciza/web-validator)"
 ACCEPT_LANGUAGE = "cs-CZ,cs;q=0.9,en;q=0.8"
 
@@ -49,28 +49,40 @@ META_TITLE_MAX = 60
 META_DESC_MIN  = 70
 META_DESC_MAX  = 160
 
-# ── Skip patterns pro robots.txt kontrolu ────────────────────────────────────
-# Domény pro které se přeskočí robots.txt kontrola (interní/dev prostředí)
-SKIP_ROBOTS_PATTERNS = [
-    "firma-staging.example",
-    "firma.cz",
-    "firma.",
-    ".cz.dev.",
-]
+# ── Firemní dev/staging domény ───────────────────────────────────────────────
+# Seznam je v souboru firemni_domeny.txt vedle tohoto souboru. Ten se na GitHub
+# nenahrává (.gitignore), vzor je ve firemni_domeny.example.txt.
+# Bez souboru program funguje, jen nezná žádné dev/staging domény.
+DOMAINS_FILE = Path(__file__).with_name("firemni_domeny.txt")
 
-# ── Skip patterns pro noindex kontrolu ───────────────────────────────────────
-# Domény kde je <meta name="robots" content="noindex"> záměr (dev/staging)
-# a noindex check se proto přeskočí. Schválně užší než SKIP_ROBOTS_PATTERNS —
-# noindex je vážnější chyba a chceme ho hlásit i na "podezřelých" doménách,
-# ne-li tady přesně definovaných.
-SKIP_NOINDEX_PATTERNS = [
-    "dev.firma.example",   # *.dev.firma.example  → dev prostředí firma
-    "firma-staging.example",       # *.firma-staging.example      → staging prostředí firma
-]
 
-# ── Patterny pro detekci staging/dev URL v HTML ─────────────────────────────
-# Když auditujeme produkční web a v HTML najdeme odkaz/obrázek/canonical
-# pointující na některou z těchto domén, je to leftover ze stagingu.
-# Sdílí stejný seznam co SKIP_NOINDEX_PATTERNS (logicky to jsou stejné domény —
-# kde je noindex záměr, tam je i URL doména která nemá vést na produkci).
+def load_domains(path: Path = DOMAINS_FILE) -> dict[str, list[str]]:
+    """Načte sekce [dev] a [robots] ze souboru s doménami. Chybí-li, vrátí prázdné seznamy."""
+    sections: dict[str, list[str]] = {"dev": [], "robots": []}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return sections
+    current = None
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip().lower()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1].strip()
+            sections.setdefault(current, [])
+        elif current:
+            sections[current].append(line)
+    return sections
+
+
+_DOMAINS = load_domains()
+
+# [dev] – domény, kde je noindex záměr. Odkaz na ně z produkčního webu
+# je zapomenutý odkaz na staging.
+SKIP_NOINDEX_PATTERNS   = _DOMAINS["dev"]
 STAGING_DOMAIN_PATTERNS = SKIP_NOINDEX_PATTERNS
+
+# Kontrola robots.txt se přeskočí pro dev domény a pro [robots]
+# (interní weby, kde robots.txt nemá produkční hodnotu).
+SKIP_ROBOTS_PATTERNS = _DOMAINS["dev"] + _DOMAINS["robots"]

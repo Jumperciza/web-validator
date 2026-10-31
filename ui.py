@@ -45,7 +45,7 @@ def is_local_url(url: str) -> bool:
         192.168/16) a link-local (169.254.0.0/16)
       - IPv6 loopback (::1) a privátní rozsahy (fc00::/7, fe80::/10)
 
-    Pro veřejné domény (firma.cz, example.cz…) vrací False.
+    Pro veřejné domény (example.cz…) vrací False.
     """
     if not url:
         return False

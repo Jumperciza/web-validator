@@ -35,9 +35,8 @@ Ochrana proti obřím webům (poučení z e-shopu: 423 stránek → 13 700 cíl�
   • druhý pokus: cíl, který skončil síťovou chybou (status 0 – timeout,
     shozené spojení), se po pauze LINK_CHECK_RETRY_DELAY ověří ještě jednou,
     a to sériově (jedno spojení, žádná paralelní zátěž). Teprve druhá chyba
-    znamená "nedostupné". Bez toho se na některých serverech
-    hlásily funkční odkazy a obrázky jako nefunkční jen proto, že server
-    neustál 5 souběžných HEAD requestů.
+    znamená "nedostupné". Některé servery neustojí 5 souběžných HEAD requestů
+    a funkční odkazy by se jinak hlásily jako nefunkční.
 """
 import threading
 import time
@@ -403,10 +402,8 @@ def check_resources(results: list, base_url: str, check_external: bool = False,
                     del probed[k]
 
     # ── Druhé kolo: cíle se síťovou chybou ──────────────────────────────────
-    # Poučení z example.cz: server při paralelních HEAD requestech občas
-    # shodí spojení (status 0) a funkční odkaz se nahlásí jako nedostupný.
-    # Zkusíme je proto po pauze ještě jednou, sériově – jedno spojení, žádná
-    # souběžná zátěž. Napodruhé úspěšný cíl je v pořádku, druhá chyba platí.
+    # Některé servery při souběžných HEAD requestech shodí spojení (status 0).
+    # Po pauze to zkusíme ještě jednou, sériově. Druhá chyba už platí.
     retried = 0
     recovered = 0
     if not aborted and max_retries:

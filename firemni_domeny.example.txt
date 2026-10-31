@@ -1,0 +1,12 @@
+# Vzor pro firemni_domeny.txt (ten se na GitHub nenahrává).
+# Zkopíruj jako firemni_domeny.txt a doplň vlastní domény.
+# Stačí část názvu – hledá se, jestli je obsažená v doméně.
+
+# Dev/staging: noindex se tu nehlásí a odkaz sem z produkce je chyba.
+[dev]
+dev.mojefirma.cz
+staging.mojefirma.cz
+
+# Navíc se přeskočí kontrola robots.txt (interní weby).
+[robots]
+mojefirma.

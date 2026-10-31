@@ -6,6 +6,7 @@ Nebo:      python -m unittest discover tests/
 """
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -13,6 +14,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from structure_check import (check_structure, check_homepage_meta,
                              extract_title, mark_duplicate_titles)
 from issues import IssueType
+
+# Testy nezávisí na lokálním firemni_domeny.txt – podstrčíme smyšlené domény.
+_DEV = ["dev.firma.example", "firma-staging.example"]
+_DOMAINS = patch.multiple("structure_check", SKIP_NOINDEX_PATTERNS=_DEV,
+                          STAGING_DOMAIN_PATTERNS=_DEV)
+
+
+def setUpModule():
+    _DOMAINS.start()
+
+
+def tearDownModule():
+    _DOMAINS.stop()
 
 
 def _has_issue(issues, issue_type: IssueType) -> bool:
@@ -318,22 +332,22 @@ class TestNoindex(unittest.TestCase):
         issues = check_structure(html, page_url="https://example.cz/")
         self.assertFalse(_has_issue(issues, IssueType.NOINDEX))
 
-    def test_dev_domain_firmareal_ignored(self):
+    def test_staging_domain_ignored(self):
         """Na *.firma-staging.example je noindex záměr – nehlásíme."""
         html = '<html><head><meta name="robots" content="noindex"></head><body><h1>A</h1></body></html>'
         issues = check_structure(html, page_url="https://www.example.firma-staging.example/")
         self.assertFalse(_has_issue(issues, IssueType.NOINDEX))
 
-    def test_dev_domain_cz_dev_firma_ignored(self):
+    def test_dev_domain_ignored(self):
         """Na *.dev.firma.example je noindex záměr – nehlásíme."""
         html = '<html><head><meta name="robots" content="noindex"></head><body><h1>A</h1></body></html>'
         issues = check_structure(html, page_url="https://www.example.dev.firma.example/")
         self.assertFalse(_has_issue(issues, IssueType.NOINDEX))
 
-    def test_other_firma_domain_still_checked(self):
-        """Normální firma.cz (ne dev/staging) noindex check probíhá – chytne se."""
+    def test_production_domain_still_checked(self):
+        """Produkční firma.example (ne dev/staging) noindex check probíhá – chytne se."""
         html = '<html><head><meta name="robots" content="noindex"></head><body><h1>A</h1></body></html>'
-        issues = check_structure(html, page_url="https://www.firma.cz/")
+        issues = check_structure(html, page_url="https://www.firma.example/")
         self.assertTrue(_has_issue(issues, IssueType.NOINDEX))
 
     def test_capitalized_noindex_detected(self):

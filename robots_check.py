@@ -2,8 +2,8 @@
 Robots.txt kontrola + detekce uživatelské sekce.
 
 robots.txt check:
-  - Přeskočí se pro domény obsahující firma-staging.example nebo firma.cz
-    (interní/dev prostředí kde robots.txt nemá produkční hodnotu).
+  - Přeskočí se pro interní/dev domény z firemni_domeny.txt
+    (robots.txt tam nemá produkční hodnotu).
   - Přeskočí se i pro lokální hosty (localhost, 127.0.0.1, *.local…) —
     lokální dev servery zřídka mají smysluplný robots.txt a kontrola
     by jen vracela falešné poplachy.

@@ -389,7 +389,7 @@ def check_structure(html: str, page_url: str = "", seo: bool = False) -> List[Is
         issues.append(Issue(type=IssueType.MISSING_VIEWPORT))
 
     # 12. Noindex meta tag — kritická chyba (web nebude v Googlu)
-    # Skip pro dev/staging domény (firma-staging.example, *.dev.firma.example)
+    # Skip pro dev/staging domény (firemni_domeny.txt)
     # a všechny lokální hosty kde je noindex záměrný.
     # Detekuje:
     #   <meta name="robots" content="noindex">

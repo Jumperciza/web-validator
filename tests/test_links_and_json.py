@@ -368,7 +368,7 @@ class TestCheckResources(unittest.TestCase):
 
 class TestNetworkRetry(unittest.TestCase):
     """
-    Server při paralelních HEAD requestech občas shodí
+    Některé servery při paralelních HEAD requestech občas shodí
     spojení. Cíl se statusem 0 se proto po pauze ověří ještě jednou, sériově –
     teprve druhá chyba znamená "nedostupné".
     """

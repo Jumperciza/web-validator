@@ -590,7 +590,7 @@ def build_sitemap_report(sitemap_urls: list, results: list) -> dict | None:
 def make_filename(url: str) -> str:
     """
     Sestaví jméno reportu z URL.
-      - Pro běžné domény vezme první část před tečkou (firma.cz → firma)
+      - Pro běžné domény vezme první část před tečkou (example.cz → example)
       - Pro IP adresy zachová celou (192.168.1.10 → 192_168_1_10)
       - localhost zůstane localhost
     """
