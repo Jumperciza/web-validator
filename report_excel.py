@@ -718,6 +718,9 @@ def _link_notes(link_report: dict) -> list[str]:
                      f"{LINK_CHECK_MAX_TARGETS} neověřeno (ověřeny ty s nejvíc výskyty)")
     if link_report.get("skipped_time"):
         notes.append(f"ℹ {link_report['skipped_time']} cílů neověřeno – vyčerpán časový limit")
+    if link_report.get("recovered"):
+        notes.append(f"ℹ {link_report['recovered']} cílů odpovědělo až na druhý pokus "
+                     f"(server neustál souběžné requesty) – neplatí za nedostupné")
     if link_report.get("unverified"):
         notes.append(f"ℹ {link_report['unverified']} cílů neověřeno kvůli síťové chybě "
                      f"(nehlásí se jako chyba)")

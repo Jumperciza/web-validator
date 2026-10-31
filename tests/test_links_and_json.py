@@ -163,6 +163,7 @@ class TestCheckResources(unittest.TestCase):
 
     def _run(self, results, table, **kw):
         calls = []
+        kw.setdefault("retry_delay", 0)     # bez čekání před druhým kolem
 
         def _fake_probe(session, url, timeout=None):
             calls.append(url)
@@ -251,8 +252,12 @@ class TestCheckResources(unittest.TestCase):
         self.assertEqual(report["checked_images"], 2)
 
     def test_network_error_counts_as_broken(self):
+        """Dvě síťové chyby za sebou (i v druhém kole) = opravdu nedostupné."""
         results = [_page(BASE, refs={"links": ["https://example.cz/timeout"]})]
-        report, _ = self._run(results, {"https://example.cz/timeout": (0, None)})
+        report, calls = self._run(results, {"https://example.cz/timeout": (0, None)})
+        self.assertEqual(calls.count("https://example.cz/timeout"), 2)
+        self.assertEqual(report["retried"], 1)
+        self.assertEqual(report["recovered"], 0)
         self.assertEqual(report["broken_links"][0]["status"], 0)
         issue = results[0]["structure_issues"][0]
         self.assertIn("nedostupné (timeout)", issue.items[0])
@@ -299,7 +304,7 @@ class TestCheckResources(unittest.TestCase):
         with patch.object(links_check, "probe_url", side_effect=_slow_probe), \
              patch.object(links_check, "LINK_CHECK_DELAY", 0):
             report = check_resources(results, BASE, session=MagicMock(), workers=1,
-                                     max_seconds=0.01)
+                                     max_seconds=0.01, retry_delay=0)
         self.assertLess(len(calls), 6)
         self.assertEqual(report["skipped_time"], 6 - len(calls))
         self.assertEqual(len(report["broken_links"]), len(calls))
@@ -317,8 +322,9 @@ class TestCheckResources(unittest.TestCase):
 
         with patch.object(links_check, "probe_url", side_effect=_dns_fail), \
              patch.object(links_check, "LINK_CHECK_DELAY", 0):
-            report = check_resources(results, BASE, session=MagicMock(), workers=1)
-        self.assertEqual(len(calls), 2)
+            report = check_resources(results, BASE, session=MagicMock(), workers=1,
+                                     retry_delay=0)
+        self.assertEqual(len(calls), 4)       # 2 cíle × 2 pokusy (druhé kolo)
         self.assertEqual(report["broken_links"], [])
         self.assertEqual(report["images"], [])
         self.assertEqual(report["unverified"], 2)
@@ -340,7 +346,8 @@ class TestCheckResources(unittest.TestCase):
         with patch.object(links_check, "probe_url", side_effect=_probe), \
              patch.object(links_check, "LINK_CHECK_DELAY", 0), \
              patch.object(links_check, "LINK_CHECK_ABORT_AFTER", 5):
-            report = check_resources(results, BASE, session=MagicMock(), workers=1)
+            report = check_resources(results, BASE, session=MagicMock(), workers=1,
+                                     retry_delay=0)
         self.assertIn("5 síťových chyb za sebou", report["aborted"])
         self.assertLess(len(calls), 41)
         self.assertEqual([b["url"] for b in report["broken_links"]],
@@ -355,6 +362,117 @@ class TestCheckResources(unittest.TestCase):
         report, calls = self._run(results, {})
         self.assertEqual(calls, [])
         self.assertEqual(report["broken_links"], [])
+
+
+# ── Druhé kolo u síťových chyb ───────────────────────────────────────────────
+
+class TestNetworkRetry(unittest.TestCase):
+    """
+    Server při paralelních HEAD requestech občas shodí
+    spojení. Cíl se statusem 0 se proto po pauze ověří ještě jednou, sériově –
+    teprve druhá chyba znamená "nedostupné".
+    """
+
+    def _run(self, results, fail_once=(), always_fail=(), **kw):
+        calls = []
+        kw.setdefault("retry_delay", 0)
+
+        def _fake_probe(session, url, timeout=None):
+            calls.append(url)
+            if url in always_fail or (url in fail_once and calls.count(url) == 1):
+                return {"status": 0, "size": None, "error": "RemoteDisconnected"}
+            return {"status": 200, "size": None, "error": ""}
+
+        with patch.object(links_check, "probe_url", side_effect=_fake_probe), \
+             patch.object(links_check, "LINK_CHECK_DELAY", 0):
+            report = check_resources(results, BASE, session=MagicMock(),
+                                     workers=1, **kw)
+        return report, calls
+
+    def test_flaky_target_recovers_on_second_try(self):
+        """Odkaz i obrázek, které napodruhé odpoví, se nehlásí jako nefunkční."""
+        results = [_page(BASE, refs={"links": ["https://example.cz/a"],
+                                     "images": ["https://example.cz/i.png"]})]
+        report, calls = self._run(results, fail_once=("https://example.cz/a",
+                                                      "https://example.cz/i.png"))
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(report["broken_links"], [])
+        self.assertEqual(report["images"], [])
+        self.assertEqual(results[0]["structure_issues"], [])
+        self.assertEqual(report["retried"], 2)
+        self.assertEqual(report["recovered"], 2)
+        self.assertEqual(report["unverified"], 0)
+
+    def test_only_failed_targets_are_retried(self):
+        """Cíle, které prošly napoprvé, se podruhé neověřují."""
+        results = [_page(BASE, refs={"links": ["https://example.cz/a",
+                                               "https://example.cz/b"]})]
+        report, calls = self._run(results, fail_once=("https://example.cz/b",))
+        self.assertEqual(calls.count("https://example.cz/a"), 1)
+        self.assertEqual(calls.count("https://example.cz/b"), 2)
+        self.assertEqual(report["retried"], 1)
+        self.assertEqual(report["recovered"], 1)
+
+    def test_second_failure_is_reported_as_broken(self):
+        results = [_page(BASE, refs={"links": ["https://example.cz/mrtva"]})]
+        report, calls = self._run(results, always_fail=("https://example.cz/mrtva",))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(report["retried"], 1)
+        self.assertEqual(report["recovered"], 0)
+        # RemoteDisconnected u vlastní domény = neověřeno, ne nefunkční odkaz
+        self.assertEqual(report["broken_links"], [])
+        self.assertEqual(report["unverified"], 1)
+
+    def test_external_target_broken_after_two_failures(self):
+        results = [_page(BASE, refs={"links": ["https://cizi.cz/x"]})]
+        report, calls = self._run(results, always_fail=("https://cizi.cz/x",),
+                                  check_external=True)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([b["url"] for b in report["broken_links"]], ["https://cizi.cz/x"])
+
+    def test_max_retries_zero_disables_second_round(self):
+        results = [_page(BASE, refs={"links": ["https://cizi.cz/x"]})]
+        report, calls = self._run(results, fail_once=("https://cizi.cz/x",),
+                                  check_external=True, max_retries=0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(report["retried"], 0)
+        self.assertEqual([b["url"] for b in report["broken_links"]], ["https://cizi.cz/x"])
+
+    def test_max_retries_limits_second_round(self):
+        urls = [f"https://cizi.cz/p{i}" for i in range(5)]
+        results = [_page(BASE, refs={"links": urls})]
+        report, calls = self._run(results, fail_once=tuple(urls),
+                                  check_external=True, max_retries=2)
+        self.assertEqual(report["retried"], 2)
+        self.assertEqual(report["recovered"], 2)
+        self.assertEqual(len(report["broken_links"]), 3)
+
+    def test_aborted_phase_skips_retry(self):
+        """Při výpadku sítě (abort) se druhé kolo nespouští – nemá co zachraňovat."""
+        urls = [f"https://cizi.cz/p{i}" for i in range(6)]
+        results = [_page(BASE, refs={"links": urls})]
+        with patch.object(links_check, "LINK_CHECK_ABORT_AFTER", 3):
+            report, calls = self._run(results, always_fail=tuple(urls),
+                                      check_external=True)
+        self.assertNotEqual(report["aborted"], "")
+        self.assertEqual(report["retried"], 0)
+        self.assertEqual(len(calls), len(set(calls)))     # žádný cíl dvakrát
+        self.assertEqual(report["broken_links"], [])
+
+    def test_on_retry_callback_gets_count(self):
+        seen = []
+        results = [_page(BASE, refs={"links": ["https://example.cz/a",
+                                               "https://example.cz/b"]})]
+        self._run(results, fail_once=("https://example.cz/a", "https://example.cz/b"),
+                  on_retry=seen.append)
+        self.assertEqual(seen, [2])
+
+    def test_retry_counts_in_json(self):
+        results = [_page(BASE, refs={"links": ["https://example.cz/a"]})]
+        report, _ = self._run(results, fail_once=("https://example.cz/a",))
+        data = build_json(results, BASE, link_report=report)
+        self.assertEqual(data["links_summary"]["retried"], 1)
+        self.assertEqual(data["links_summary"]["recovered"], 1)
 
 
 # ── JSON export ──────────────────────────────────────────────────────────────

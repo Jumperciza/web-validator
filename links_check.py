@@ -32,6 +32,12 @@ Ochrana proti obřím webům (poučení z e-shopu: 423 stránek → 13 700 cíl�
     přeruší a žádný síťově neověřený cíl se nehlásí jako chyba (skóre
     zůstane nezkreslené). DNS / connection chyba u vlastní domény webu
     (kterou jsme právě stáhli) se nikdy nebere jako nefunkční odkaz.
+  • druhý pokus: cíl, který skončil síťovou chybou (status 0 – timeout,
+    shozené spojení), se po pauze LINK_CHECK_RETRY_DELAY ověří ještě jednou,
+    a to sériově (jedno spojení, žádná paralelní zátěž). Teprve druhá chyba
+    znamená "nedostupné". Bez toho se na některých serverech
+    hlásily funkční odkazy a obrázky jako nefunkční jen proto, že server
+    neustál 5 souběžných HEAD requestů.
 """
 import threading
 import time
@@ -45,7 +51,8 @@ from bs4 import BeautifulSoup
 
 from config import (USER_AGENT, ACCEPT_LANGUAGE, DEFAULT_TIMEOUT, CRAWL_WORKERS,
                     IMAGE_MAX_KB, LINK_CHECK_DELAY, LINK_CHECK_MAX_TARGETS,
-                    LINK_CHECK_MAX_SECONDS, LINK_CHECK_ABORT_AFTER)
+                    LINK_CHECK_MAX_SECONDS, LINK_CHECK_ABORT_AFTER,
+                    LINK_CHECK_RETRY_DELAY, LINK_CHECK_MAX_RETRIES)
 from issues import Issue, IssueType
 from ui import is_local_url
 
@@ -245,6 +252,9 @@ def check_resources(results: list, base_url: str, check_external: bool = False,
                     on_progress=None,
                     max_targets: int | None = None,
                     max_seconds: float | None = None,
+                    retry_delay: float | None = None,
+                    max_retries: int | None = None,
+                    on_retry=None,
                     seo: bool = False) -> dict:
     """
     Ověří odkazy a obrázky ze všech stránek v `results` (klíč "refs" z
@@ -266,6 +276,8 @@ def check_resources(results: list, base_url: str, check_external: bool = False,
         "skipped_limit": int,      # cílů nad LINK_CHECK_MAX_TARGETS (neověřeno)
         "skipped_time": int,       # cílů neověřeno kvůli časovému limitu
         "unverified": int,         # cílů se síťovou chybou (nehlásí se jako chyba)
+        "retried": int,            # cílů ověřovaných podruhé (síťová chyba)
+        "recovered": int,          # z toho těch, které napodruhé odpověděly
         "aborted": str,            # důvod přerušení fáze ("" = doběhla celá)
         "elapsed": float,          # doba ověřování (s)
         "check_external": bool,
@@ -275,6 +287,10 @@ def check_resources(results: list, base_url: str, check_external: bool = False,
         max_targets = LINK_CHECK_MAX_TARGETS
     if max_seconds is None:
         max_seconds = LINK_CHECK_MAX_SECONDS
+    if retry_delay is None:
+        retry_delay = LINK_CHECK_RETRY_DELAY
+    if max_retries is None:
+        max_retries = LINK_CHECK_MAX_RETRIES
 
     link_sources: dict[str, list[str]] = defaultdict(list)   # key → stránky
     image_sources: dict[str, list[str]] = defaultdict(list)
@@ -386,6 +402,31 @@ def check_resources(results: list, base_url: str, check_external: bool = False,
                 if probed[k]["status"] == 0:
                     del probed[k]
 
+    # ── Druhé kolo: cíle se síťovou chybou ──────────────────────────────────
+    # Poučení z example.cz: server při paralelních HEAD requestech občas
+    # shodí spojení (status 0) a funkční odkaz se nahlásí jako nedostupný.
+    # Zkusíme je proto po pauze ještě jednou, sériově – jedno spojení, žádná
+    # souběžná zátěž. Napodruhé úspěšný cíl je v pořádku, druhá chyba platí.
+    retried = 0
+    recovered = 0
+    if not aborted and max_retries:
+        failed = [k for k in probed if probed[k]["status"] == 0][:max_retries]
+        if failed:
+            if on_retry:
+                on_retry(len(failed))
+            if retry_delay > 0 and not is_local_url(base_url):
+                time.sleep(retry_delay)
+            for k in failed:
+                if deadline and time.time() > deadline:
+                    break
+                second = probe_url(session, target_url[k], timeout=timeout)
+                retried += 1
+                if second["status"]:
+                    probed[k] = second      # server odpověděl – první chyba byla falešná
+                    recovered += 1
+                if pause > 0:
+                    time.sleep(pause)
+
     elapsed = time.time() - started
     skipped_time = 0 if aborted else len(to_probe) - len(attempted)
 
@@ -493,6 +534,8 @@ def check_resources(results: list, base_url: str, check_external: bool = False,
         "skipped_limit":    skipped_limit,
         "skipped_time":     skipped_time,
         "unverified":       unverified,
+        "retried":          retried,
+        "recovered":        recovered,
         "aborted":          aborted,
         "elapsed":          round(elapsed, 1),
         "check_external":   check_external,

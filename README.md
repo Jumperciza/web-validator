@@ -83,6 +83,7 @@ Po stažení všech stránek se z jejich HTML posbírají všechny `<a href>`, `
 **Ochrana proti obřím webům** (e-shopy s filtry mají klidně 13 000 unikátních URL na 400 stránkách):
 - Interní URL s parametry (`/kremy/?p13[0]=5`, `?r=cs`, `logo.png?v=3`) se **sloučí na základní URL** – filtr na funkční kategorii je funkční. Výjimka: skriptové cesty (`index.php?id=5`), kde parametry nesou obsah.
 - Ověřuje se **max 1 500 cílů** (`LINK_CHECK_MAX_TARGETS`, přednost mají ty s nejvíc výskyty) a fáze má **časový rozpočet 10 min** (`LINK_CHECK_MAX_SECONDS`). Co se nestihne, je v reportu „neověřeno“, ne „nefunkční“.
+- **Druhý pokus u síťových chyb:** cíl, u kterého spojení selhalo (timeout, shozené spojení – v reportu „nedostupné“), se po pauze (`LINK_CHECK_RETRY_DELAY`, 2 s) ověří **ještě jednou a sériově** – tedy bez souběžné zátěže, kterou některé servery neustojí. Teprve druhá chyba znamená „nedostupné“; co projde napodruhé, je v pořádku a jen se vypíše poznámka. Druhé kolo je omezené na 50 cílů (`LINK_CHECK_MAX_RETRIES`) – víc chyb už vypadá na výpadek sítě, ne na přetížený server.
 - **Pojistka proti výpadku sítě:** DNS / connection chyba u vlastní domény webu se nikdy nehlásí jako nefunkční odkaz, a po 15 síťových chybách za sebou (`LINK_CHECK_ABORT_AFTER`) se fáze přeruší – nic z toho neovlivní skóre. Bez toho by výpadek Wi-Fi uprostřed běhu znamenal tisíce falešných 404.
 - HEAD requesty jedou přes keep-alive spojení (jedno DNS + TLS na worker, ne na request).
 
@@ -288,7 +289,7 @@ V závěrečném souhrnu je řádek `Doba fází : stažení 41s | validace 3s |
 ├── report_json.py      ← JSON výstup + porovnání s minulým během
 ├── updater.py          ← Aktualizace vnu.jar z GitHubu
 ├── colors.py           ← Barevný terminál
-├── tests/              ← Unit testy (387 testů)
+├── tests/              ← Unit testy (396 testů)
 │   ├── test_structure_check.py
 │   ├── test_other.py
 │   ├── test_network_checks.py
@@ -306,7 +307,7 @@ V závěrečném souhrnu je řádek `Doba fází : stažení 41s | validace 3s |
 python -m unittest discover tests/
 ```
 
-387 testů pokrývá všechny HTML kontroly (včetně noindex, staging URL, title, canonical, Open Graph a rozměrů obrázků), SEO modul za `--seo` (výchozí stav bez SEO nálezů, skóre jen z jádra, sekce v Excelu, porovnání běhů s různým režimem), detekci testovacího obsahu (všech 6 skupin, včetně testů na falešné poplachy u běžného českého textu), dostupnost (soft 404 včetně falešných poplachů typu „404 m²“, prázdné odkazy vs. JS ovladače, test vlastní 404 stránky, detekci bot ochrany Anubis/Cloudflare, sitemap hygienu), kontrolu odkazů a obrázků (mockované HEAD requesty, přesměrování, externí cíle, velikost, slučování URL s parametry, limit cílů, časový rozpočet, pojistka proti výpadku sítě), JSON export a porovnání s minulým během, CLI přepínače (`--exclude`, `--output`/`--keep`, `--fail-under` exit kódy), URL validaci, statistiky a agregaci W3C chyb, robots.txt parser (včetně detekce Disallow: /), sitemap parser (včetně `.xml.gz`), crawler (filtry, deduplikace, robots.txt, hybrid režim), detekci `/uzivatel/` (soft 404, přesměrování), kódování stažených stránek, zamčený Excel soubor a obsah vygenerovaného Excel reportu.
+396 testů pokrývá všechny HTML kontroly (včetně noindex, staging URL, title, canonical, Open Graph a rozměrů obrázků), SEO modul za `--seo` (výchozí stav bez SEO nálezů, skóre jen z jádra, sekce v Excelu, porovnání běhů s různým režimem), detekci testovacího obsahu (všech 6 skupin, včetně testů na falešné poplachy u běžného českého textu), dostupnost (soft 404 včetně falešných poplachů typu „404 m²“, prázdné odkazy vs. JS ovladače, test vlastní 404 stránky, detekci bot ochrany Anubis/Cloudflare, sitemap hygienu), kontrolu odkazů a obrázků (mockované HEAD requesty, přesměrování, externí cíle, velikost, slučování URL s parametry, limit cílů, časový rozpočet, druhý pokus u síťových chyb, pojistka proti výpadku sítě), JSON export a porovnání s minulým během, CLI přepínače (`--exclude`, `--output`/`--keep`, `--fail-under` exit kódy), URL validaci, statistiky a agregaci W3C chyb, robots.txt parser (včetně detekce Disallow: /), sitemap parser (včetně `.xml.gz`), crawler (filtry, deduplikace, robots.txt, hybrid režim), detekci `/uzivatel/` (soft 404, přesměrování), kódování stažených stránek, zamčený Excel soubor a obsah vygenerovaného Excel reportu.
 
 ---
 

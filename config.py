@@ -38,6 +38,10 @@ LINK_CHECK_DELAY = 0.2 # pauza po každém HEAD requestu v jednom workeru (s)
 LINK_CHECK_MAX_TARGETS = 1500  # max ověřovaných cílů (přednost mají ty s nejvíc výskyty)
 LINK_CHECK_MAX_SECONDS = 600   # časový rozpočet fáze [LINKS]; zbytek se označí jako neověřený
 LINK_CHECK_ABORT_AFTER = 15    # tolik síťových chyb za sebou = výpadek sítě → fáze se přeruší
+# Druhý pokus: cíl se síťovou chybou (status 0) se po pauze ověří ještě jednou,
+# sériově – server může padat jen kvůli paralelní zátěži (viz links_check).
+LINK_CHECK_RETRY_DELAY = 2.0   # pauza před druhým kolem (s)
+LINK_CHECK_MAX_RETRIES = 50    # max cílů zkoušených podruhé (víc = spíš výpadek sítě)
 
 # ── Prahy pro meta tagy ──────────────────────────────────────────────────────
 META_TITLE_MIN = 30

@@ -448,8 +448,13 @@ def run_link_checks(results: list, url: str, check_external: bool = False,
         if done % 10 == 0 or done == total:
             write(f"\r  Ověřeno: {done}/{total}   ")
 
+    def _retry(n: int) -> None:
+        print()
+        gray(f"  ({n} cílů skončilo síťovou chybou – zkouším je ještě jednou, "
+             f"sériově a s pauzou)"); print()
+
     report = check_resources(results, url, check_external=check_external,
-                             on_progress=_progress, seo=seo)
+                             on_progress=_progress, on_retry=_retry, seo=seo)
     PHASE_TIMES["odkazy"] = report.get("elapsed", 0.0)
     if report["checked_links"] + report["checked_images"]:
         print()
@@ -504,6 +509,9 @@ def run_link_checks(results: list, url: str, check_external: bool = False,
     if report.get("skipped_time"):
         gray(f"  ({report['skipped_time']} cílů neověřeno – vyčerpán časový limit "
              f"{_fmt_duration(LINK_CHECK_MAX_SECONDS)})"); print()
+    if report.get("recovered"):
+        gray(f"  ({report['recovered']} z {report['retried']} cílů se síťovou chybou "
+             f"odpovědělo na druhý pokus – nehlásí se jako nedostupné)"); print()
     if report.get("unverified"):
         gray(f"  ({report['unverified']} cílů neověřeno kvůli síťové chybě – "
              f"nehlásí se jako chyba)"); print()
